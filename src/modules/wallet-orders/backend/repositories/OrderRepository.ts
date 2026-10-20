@@ -55,7 +55,7 @@ class OrderRepository {
           payment_status: order.paymentStatus,
           fulfillment_status: order.fulfillmentStatus,
           assigned_printer_id: order.assignedPrinter || null,
-          ai_tier: order.aiTier || 'none',
+          ai_tier: (order as any).aiTier || 'none',
           created_at: order.createdAt,
           updated_at: order.updatedAt,
         },
