@@ -53,8 +53,7 @@ const nextConfig: NextConfig = {
     ],
   },
   async rewrites() {
-    const simBackendUrl = process.env.SIMULATOR_BACKEND_URL || 'http://127.0.0.1:8000';
-    return [
+    const rules = [
       {
         source: '/3dsim',
         destination: '/3dsim/index.html',
@@ -63,11 +62,14 @@ const nextConfig: NextConfig = {
         source: '/3dsim/',
         destination: '/3dsim/index.html',
       },
-      {
-        source: '/api/v1/:path*',
-        destination: `${simBackendUrl}/api/v1/:path*`,
-      },
     ];
+    if (process.env.SIMULATOR_BACKEND_URL) {
+      rules.push({
+        source: '/api/v1/:path*',
+        destination: `${process.env.SIMULATOR_BACKEND_URL}/api/v1/:path*`,
+      });
+    }
+    return rules;
   },
 };
 

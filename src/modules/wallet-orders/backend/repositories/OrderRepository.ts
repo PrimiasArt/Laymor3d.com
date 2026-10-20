@@ -8,10 +8,60 @@ import {
   OrderPaymentMethod,
   OrderPaymentStatus,
 } from '@/backend/domain/order';
+import { supabaseCloudService } from '@/backend/db/supabaseClient';
 
 class OrderRepository {
   private orders: IOrder[] = [...INITIAL_ORDERS];
   private printers: IPrinterDevice[] = [...WORKSHOP_PRINTERS];
+  private hydratedFromCloud = false;
+
+  constructor() {
+    this.hydrateFromSupabase();
+  }
+
+  private hydrateFromSupabase() {
+    if (this.hydratedFromCloud) return;
+    this.hydratedFromCloud = true;
+    supabaseCloudService
+      .loadKvState<{ orders?: IOrder[]; printers?: IPrinterDevice[] }>('laymor_orders_state')
+      .then((saved) => {
+        if (saved?.orders && Array.isArray(saved.orders) && saved.orders.length > 0) {
+          this.orders = saved.orders;
+        }
+        if (saved?.printers && Array.isArray(saved.printers) && saved.printers.length > 0) {
+          this.printers = saved.printers;
+        }
+      })
+      .catch(() => {});
+  }
+
+  private persistOrderToSupabase(order: IOrder) {
+    supabaseCloudService
+      .saveKvState('laymor_orders_state', { orders: this.orders, printers: this.printers })
+      .catch(() => {});
+    supabaseCloudService
+      .upsertTable('laymor_orders', [
+        {
+          id: order.id,
+          user_id: order.userId || 'guest',
+          customer_name: order.customerName,
+          customer_phone: order.customerPhone,
+          customer_address: order.customerAddress,
+          customer_email: order.customerEmail || '',
+          notes: order.notes || '',
+          items: order.items || [],
+          total_amount_vnd: Number(order.totalAmountVnd || 0),
+          payment_method: order.paymentMethod,
+          payment_status: order.paymentStatus,
+          fulfillment_status: order.fulfillmentStatus,
+          assigned_printer_id: order.assignedPrinter || null,
+          ai_tier: order.aiTier || 'none',
+          created_at: order.createdAt,
+          updated_at: order.updatedAt,
+        },
+      ])
+      .catch(() => {});
+  }
 
   getAllOrders(): IOrder[] {
     return this.orders;
@@ -56,6 +106,7 @@ class OrderRepository {
     };
 
     this.orders.unshift(newOrder);
+    this.persistOrderToSupabase(newOrder);
     return newOrder;
   }
 
@@ -89,6 +140,7 @@ class OrderRepository {
       }
     }
 
+    this.persistOrderToSupabase(order);
     return order;
   }
 
@@ -107,6 +159,7 @@ class OrderRepository {
       prt.currentProgressPercent = 10;
     }
 
+    this.persistOrderToSupabase(order);
     return order;
   }
 

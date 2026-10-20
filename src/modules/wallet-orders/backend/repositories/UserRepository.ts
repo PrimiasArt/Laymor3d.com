@@ -1,9 +1,11 @@
 import { IUser, UserRole, INITIAL_USERS } from '@/backend/domain/user';
 import { IPaymentTransaction } from '@/backend/domain/payment';
+import { supabaseCloudService } from '@/backend/db/supabaseClient';
 
 class UserRepository {
   private users: IUser[] = [...INITIAL_USERS];
   private activeUserId: string = 'usr-admin-1'; // Mặc định là Admin để người dùng trải nghiệm toàn quyền
+  private hydratedFromCloud = false;
   private transactions: IPaymentTransaction[] = [
     {
       id: 'tx-init-1',
@@ -28,6 +30,51 @@ class UserRepository {
       updatedAt: '2026-01-01T00:00:00.000Z',
     },
   ];
+
+  constructor() {
+    this.hydrateFromSupabase();
+  }
+
+  private hydrateFromSupabase() {
+    if (this.hydratedFromCloud) return;
+    this.hydratedFromCloud = true;
+    supabaseCloudService
+      .loadKvState<{ users?: IUser[]; transactions?: IPaymentTransaction[] }>('laymor_users_state')
+      .then((saved) => {
+        if (saved?.users && Array.isArray(saved.users) && saved.users.length > 0) {
+          this.users = saved.users;
+        }
+        if (saved?.transactions && Array.isArray(saved.transactions) && saved.transactions.length > 0) {
+          this.transactions = saved.transactions;
+        }
+      })
+      .catch(() => {});
+  }
+
+  private persistUsersToSupabase(targetUser?: IUser) {
+    supabaseCloudService
+      .saveKvState('laymor_users_state', {
+        users: this.users,
+        transactions: this.transactions,
+      })
+      .catch(() => {});
+
+    if (targetUser) {
+      supabaseCloudService
+        .upsertTable('laymor_users', [
+          {
+            id: targetUser.id,
+            name: targetUser.name,
+            email: targetUser.email,
+            role: targetUser.role || 'user',
+            avatar: targetUser.avatar || '',
+            wallet_balance_vnd: Number(targetUser.walletBalanceVnd || 0),
+            updated_at: new Date().toISOString(),
+          },
+        ])
+        .catch(() => {});
+    }
+  }
 
   getAllUsers(): IUser[] {
     return this.users;
@@ -59,6 +106,7 @@ class UserRepository {
     const user = this.getUserById(id);
     if (!user) return 0;
     user.walletBalanceVnd = Math.max(0, user.walletBalanceVnd + deltaVnd);
+    this.persistUsersToSupabase(user);
     return user.walletBalanceVnd;
   }
 
@@ -66,6 +114,7 @@ class UserRepository {
     const user = this.getUserById(id);
     if (!user) return 0;
     user.sellerPendingBalanceVnd = Math.max(0, (user.sellerPendingBalanceVnd || 0) + deltaVnd);
+    this.persistUsersToSupabase(user);
     return user.sellerPendingBalanceVnd;
   }
 
@@ -77,6 +126,7 @@ class UserRepository {
       updatedAt: new Date().toISOString(),
     };
     this.transactions.unshift(newTx);
+    this.persistUsersToSupabase();
     return newTx;
   }
 
@@ -88,6 +138,7 @@ class UserRepository {
     const user = this.getUserById(id);
     if (!user) return false;
     user.role = newRole;
+    this.persistUsersToSupabase(user);
     return true;
   }
 
@@ -95,6 +146,7 @@ class UserRepository {
     const user = this.getUserById(id);
     if (!user) return undefined;
     user.status = user.status === 'active' ? 'suspended' : 'active';
+    this.persistUsersToSupabase(user);
     return user;
   }
 
@@ -102,6 +154,7 @@ class UserRepository {
     const user = this.getUserById(id);
     if (!user) return undefined;
     Object.assign(user, updates);
+    this.persistUsersToSupabase(user);
     return user;
   }
 

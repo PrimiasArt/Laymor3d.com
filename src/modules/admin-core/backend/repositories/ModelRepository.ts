@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { IModel3D, IAI3DJob, PlatformType } from '@/backend/domain/models';
+import { supabaseCloudService } from '@/backend/db/supabaseClient';
 
 /**
  * 24 Mô hình 3D thực tế hạt nhân ban đầu (Seed Models)
@@ -455,8 +456,21 @@ class ModelRepository {
   private lastMtime: number = 0;
 
   constructor() {
-    this.filePath = path.join(process.cwd(), 'data', 'crawled_models.json');
+    const baseDir = process.env.VERCEL ? '/tmp' : path.join(process.cwd(), 'data');
+    this.filePath = path.join(baseDir, 'crawled_models.json');
     this.syncWithFile();
+    this.hydrateFromSupabase();
+  }
+
+  private hydrateFromSupabase(): void {
+    supabaseCloudService
+      .loadKvState<IModel3D[]>('laymor_crawled_models')
+      .then((cloudModels) => {
+        if (Array.isArray(cloudModels) && cloudModels.length > 0) {
+          this.models = cloudModels;
+        }
+      })
+      .catch(() => {});
   }
 
   /**
@@ -489,18 +503,18 @@ class ModelRepository {
         }
         this.initSeedData();
       }
-    } catch (err) {
-      console.error('Lỗi khi đồng bộ ModelRepository với tệp cục bộ:', err);
+    } catch {
       if (this.models.length === 0) {
-        this.initSeedData();
+        this.models = [...SEED_MODELS];
       }
     }
   }
 
   /**
-   * Ghi toàn bộ dữ liệu ra tệp data/crawled_models.json
+   * Ghi toàn bộ dữ liệu ra tệp cục bộ (/tmp trên Vercel) & đồng bộ lên Supabase Cloud
    */
   private saveToFile(): void {
+    supabaseCloudService.saveKvState('laymor_crawled_models', this.models).catch(() => {});
     try {
       const dir = path.dirname(this.filePath);
       if (!fs.existsSync(dir)) {
@@ -509,8 +523,8 @@ class ModelRepository {
       fs.writeFileSync(this.filePath, JSON.stringify(this.models, null, 2), 'utf-8');
       const stat = fs.statSync(this.filePath);
       this.lastMtime = stat.mtimeMs;
-    } catch (err) {
-      console.error('Lỗi khi lưu dữ liệu ModelRepository vào tệp:', err);
+    } catch {
+      // Trên môi trường Serverless Read-Only, dữ liệu đã được đồng bộ lên Supabase
     }
   }
 

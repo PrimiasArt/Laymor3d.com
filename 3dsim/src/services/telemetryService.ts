@@ -1,9 +1,9 @@
 /**
  * Telemetry Ingestion Client for 3D PrintSim Pro.
- * Communicates with the FastAPI Clean Architecture Backend (port 8000).
+ * Communicates with the Unified Laymor3D Cloud API (/api/v1/* on Vercel + Supabase).
  */
 
-const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
+const BACKEND_BASE_URL = (import.meta as any).env?.VITE_BACKEND_URL || '';
 
 function getOrCreateSessionId(): string {
   try {
