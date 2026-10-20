@@ -14,7 +14,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: '../public/3dsim',
+    outDir: process.env.VERCEL ? 'dist' : '../public/3dsim',
     emptyOutDir: true,
   },
   server: {
