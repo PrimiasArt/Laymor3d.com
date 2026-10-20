@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-drillguidejig" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-drillguidejig" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#b45309" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#b45309" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#f59e0b" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-drillguidejig)" />
+  <rect width="600" height="400" fill="url(#glow-drillguidejig)" />
+  
+  <!-- Perspective Print Bed Grid -->
+  <g stroke="#1f2937" stroke-width="1.2" opacity="0.6">
+    <path d="M50 340 L550 340 M100 365 L500 365 M150 385 L450 385" stroke-dasharray="6 4" />
+    <path d="M150 385 L50 340 M250 385 L200 340 M350 385 L400 340 M450 385 L550 340" />
+  </g>
+
+  <!-- Main Themed Illustration -->
+  <g filter="url(#shadow)">
+    
+    <!-- V-Block Guide Body -->
+    <polygon points="210,240 300,150 390,240 390,290 210,290" fill="#1e293b" stroke="#f59e0b" stroke-width="3" />
+    <!-- Hardened Steel Bushing Holes -->
+    <circle cx="260" cy="225" r="14" fill="#0f172a" stroke="#fbbf24" stroke-width="3" />
+    <circle cx="300" cy="205" r="18" fill="#0f172a" stroke="#fbbf24" stroke-width="3" />
+    <circle cx="340" cy="225" r="14" fill="#0f172a" stroke="#fbbf24" stroke-width="3" />
+    <!-- Centering Centerline -->
+    <line x1="300" y1="150" x2="300" y2="290" stroke="#ef4444" stroke-width="2" stroke-dasharray="6 4" />
+  
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#f59e0b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">WOODWORKING & TOOLS</text>
+  <text x="576" y="41" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="end">DRILL GUIDE JIG</text>
+</svg>

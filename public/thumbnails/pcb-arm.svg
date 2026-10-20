@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-pcbworkstationarm" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-pcbworkstationarm" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#047857" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#047857" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#10b981" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-pcbworkstationarm)" />
+  <rect width="600" height="400" fill="url(#glow-pcbworkstationarm)" />
+  
+  <!-- Perspective Print Bed Grid -->
+  <g stroke="#1f2937" stroke-width="1.2" opacity="0.6">
+    <path d="M50 340 L550 340 M100 365 L500 365 M150 385 L450 385" stroke-dasharray="6 4" />
+    <path d="M150 385 L50 340 M250 385 L200 340 M350 385 L400 340 M450 385 L550 340" />
+  </g>
+
+  <!-- Main Themed Illustration -->
+  <g filter="url(#shadow)">
+    
+    <!-- Base Plate -->
+    <rect x="180" y="300" width="240" height="25" rx="5" fill="#1e293b" stroke="#334155" stroke-width="2" />
+    <!-- Flexible Gooseneck Arms -->
+    <path d="M220 300 Q190 220 240 180" fill="none" stroke="#64748b" stroke-width="10" stroke-linecap="round" />
+    <path d="M380 300 Q410 220 360 180" fill="none" stroke="#64748b" stroke-width="10" stroke-linecap="round" />
+    <!-- Alligator Clips -->
+    <rect x="235" y="172" width="16" height="16" rx="2" fill="#ef4444" />
+    <rect x="350" y="172" width="16" height="16" rx="2" fill="#ef4444" />
+    <!-- Held PCB Board -->
+    <rect x="245" y="145" width="110" height="70" rx="4" fill="#047857" stroke="#34d399" stroke-width="2.5" />
+    <!-- IC Chip -->
+    <rect x="280" y="165" width="40" height="30" rx="3" fill="#0f172a" stroke="#94a3b8" stroke-width="1.5" />
+    <!-- Traces -->
+    <path d="M255 160 L280 160 M255 180 L280 180 M320 170 L345 170 M320 190 L345 190" stroke="#facc15" stroke-width="2" />
+  
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#10b981" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">ELECTRONICS</text>
+  <text x="576" y="41" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="end">PCB WORKSTATION ARM</text>
+</svg>

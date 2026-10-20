@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-spool-esun" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-spool-esun" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.25" />
+      <stop offset="100%" stop-color="#f59e0b" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="grey-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#94a3b8" />
+      <stop offset="100%" stop-color="#64748b" />
+    </linearGradient>
+    <filter id="shadow-esun" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#f59e0b" flood-opacity="0.3" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-spool-esun)" />
+  <rect width="600" height="400" fill="url(#glow-spool-esun)" />
+  
+  <!-- Print Bed Grid Lines -->
+  <g stroke="#1e293b" stroke-width="1.2" opacity="0.6">
+    <path d="M50 350 L550 350 M100 375 L500 375" stroke-dasharray="6 4" />
+    <path d="M150 375 L50 350 M250 375 L200 350 M350 375 L400 350 M450 375 L550 350" />
+  </g>
+
+  <!-- Spool Illustration -->
+  <g filter="url(#shadow-esun)">
+    <!-- Outer Flange (Black eSUN Spool) -->
+    <circle cx="300" cy="190" r="115" fill="#1e293b" stroke="#f59e0b" stroke-width="4" />
+    <!-- Filament Coil Bed (Silver Grey PLA+) -->
+    <circle cx="300" cy="190" r="96" fill="url(#grey-gradient)" stroke="#cbd5e1" stroke-width="2" />
+    <!-- Coils Texture -->
+    <circle cx="300" cy="190" r="88" fill="none" stroke="#e2e8f0" stroke-width="4" stroke-dasharray="8 3" />
+    <circle cx="300" cy="190" r="80" fill="none" stroke="#475569" stroke-width="4" stroke-dasharray="10 3" />
+    <circle cx="300" cy="190" r="72" fill="none" stroke="#e2e8f0" stroke-width="4" stroke-dasharray="7 2" />
+    <circle cx="300" cy="190" r="64" fill="none" stroke="#475569" stroke-width="4" stroke-dasharray="9 3" />
+    <!-- Inner Core Hub -->
+    <circle cx="300" cy="190" r="54" fill="#0f172a" stroke="#334155" stroke-width="4" />
+    <!-- Spool Cutouts -->
+    <circle cx="300" cy="155" r="12" fill="#1e293b" />
+    <circle cx="330" cy="205" r="12" fill="#1e293b" />
+    <circle cx="270" cy="205" r="12" fill="#1e293b" />
+    <!-- Center Spindle Hole -->
+    <circle cx="300" cy="190" r="22" fill="#020617" stroke="#cbd5e1" stroke-width="2.5" />
+    <!-- eSUN Tag -->
+    <rect x="286" y="112" width="28" height="12" rx="2" fill="#f59e0b" opacity="0.9" />
+    <text x="300" y="121" fill="#020617" font-family="sans-serif" font-size="7" font-weight="900" text-anchor="middle">eSUN</text>
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#fbbf24" font-family="system-ui, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">HIGH TOUGHNESS • PLA+</text>
+  <text x="576" y="41" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11" font-weight="600" text-anchor="end">eSUN PLA PRO 1.75MM</text>
+</svg>

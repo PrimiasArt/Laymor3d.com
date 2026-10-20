@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-laptopstand" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-laptopstand" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#475569" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#475569" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#94a3b8" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-laptopstand)" />
+  <rect width="600" height="400" fill="url(#glow-laptopstand)" />
+  
+  <!-- Perspective Print Bed Grid -->
+  <g stroke="#1f2937" stroke-width="1.2" opacity="0.6">
+    <path d="M50 340 L550 340 M100 365 L500 365 M150 385 L450 385" stroke-dasharray="6 4" />
+    <path d="M150 385 L50 340 M250 385 L200 340 M350 385 L400 340 M450 385 L550 340" />
+  </g>
+
+  <!-- Main Themed Illustration -->
+  <g filter="url(#shadow)">
+    
+    <!-- Laptop silhouette -->
+    <polygon points="200,160 400,160 420,230 180,230" fill="#334155" stroke="#94a3b8" stroke-width="2" />
+    <!-- Screen glow -->
+    <polygon points="215,168 385,168 395,215 205,215" fill="#0284c7" opacity="0.8" />
+    <!-- Aluminum Triangular Legs -->
+    <polygon points="180,230 300,320 220,320" fill="none" stroke="#f1f5f9" stroke-width="6" stroke-linejoin="round" />
+    <polygon points="420,230 300,320 380,320" fill="none" stroke="#f1f5f9" stroke-width="6" stroke-linejoin="round" />
+    <!-- Crossbar -->
+    <line x1="220" y1="315" x2="380" y2="315" stroke="#cbd5e1" stroke-width="8" stroke-linecap="round" />
+  
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">OFFICE & ERGONOMICS</text>
+  <text x="576" y="41" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="end">LAPTOP STAND</text>
+</svg>

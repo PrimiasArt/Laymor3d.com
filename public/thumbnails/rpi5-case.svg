@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-raspberrypi5case" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-raspberrypi5case" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#991b1b" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#991b1b" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#dc2626" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-raspberrypi5case)" />
+  <rect width="600" height="400" fill="url(#glow-raspberrypi5case)" />
+  
+  <!-- Perspective Print Bed Grid -->
+  <g stroke="#1f2937" stroke-width="1.2" opacity="0.6">
+    <path d="M50 340 L550 340 M100 365 L500 365 M150 385 L450 385" stroke-dasharray="6 4" />
+    <path d="M150 385 L50 340 M250 385 L200 340 M350 385 L400 340 M450 385 L550 340" />
+  </g>
+
+  <!-- Main Themed Illustration -->
+  <g filter="url(#shadow)">
+    
+    <!-- Armor Enclosure -->
+    <rect x="210" y="140" width="180" height="130" rx="10" fill="#1e293b" stroke="#ef4444" stroke-width="3" />
+    <!-- Aluminum Heatsink Fins -->
+    
+      <rect x="235" y="160" width="80" height="6" rx="2" fill="#475569" stroke="#94a3b8" stroke-width="1" />
+    
+      <rect x="235" y="175" width="80" height="6" rx="2" fill="#475569" stroke="#94a3b8" stroke-width="1" />
+    
+      <rect x="235" y="190" width="80" height="6" rx="2" fill="#475569" stroke="#94a3b8" stroke-width="1" />
+    
+      <rect x="235" y="205" width="80" height="6" rx="2" fill="#475569" stroke="#94a3b8" stroke-width="1" />
+    
+      <rect x="235" y="220" width="80" height="6" rx="2" fill="#475569" stroke="#94a3b8" stroke-width="1" />
+    
+    <!-- Active Cooling Fan Circular Grille -->
+    <circle cx="345" cy="195" r="28" fill="#0f172a" stroke="#f87171" stroke-width="2" />
+    <circle cx="345" cy="195" r="10" fill="#dc2626" />
+    <!-- GPIO / USB Port Outlines -->
+    <rect x="200" y="160" width="10" height="30" fill="#94a3b8" />
+    <rect x="200" y="200" width="10" height="30" fill="#94a3b8" />
+  
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#dc2626" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">GADGETS & SBC</text>
+  <text x="576" y="41" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="end">RASPBERRY PI 5 CASE</text>
+</svg>

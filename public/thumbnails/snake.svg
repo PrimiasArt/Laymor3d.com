@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-mechanicalsnake" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-mechanicalsnake" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#059669" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#059669" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#10b981" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-mechanicalsnake)" />
+  <rect width="600" height="400" fill="url(#glow-mechanicalsnake)" />
+  
+  <!-- Perspective Print Bed Grid -->
+  <g stroke="#1f2937" stroke-width="1.2" opacity="0.6">
+    <path d="M50 340 L550 340 M100 365 L500 365 M150 385 L450 385" stroke-dasharray="6 4" />
+    <path d="M150 385 L50 340 M250 385 L200 340 M350 385 L400 340 M450 385 L550 340" />
+  </g>
+
+  <!-- Main Themed Illustration -->
+  <g filter="url(#shadow)">
+    
+    <!-- S-Curve Jointed Snake -->
+    <path d="M170 280 Q220 180 290 250 T410 200 L440 180" fill="none" stroke="#047857" stroke-width="24" stroke-linecap="round" />
+    <path d="M170 280 Q220 180 290 250 T410 200 L440 180" fill="none" stroke="#34d399" stroke-width="14" stroke-linecap="round" />
+    <!-- Scale Bands -->
+    <path d="M170 280 Q220 180 290 250 T410 200 L440 180" fill="none" stroke="#064e3b" stroke-width="16" stroke-dasharray="8 8" />
+    <!-- Head & Tongue -->
+    <polygon points="435,175 465,165 460,195 435,185" fill="#10b981" stroke="#a7f3d0" stroke-width="2" />
+    <circle cx="450" cy="175" r="3" fill="#facc15" />
+    <path d="M465 172 L485 170 L492 163 M485 170 L492 177" fill="none" stroke="#ef4444" stroke-width="2" />
+  
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#10b981" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">TOYS & ANIMALS</text>
+  <text x="576" y="41" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="end">MECHANICAL SNAKE</text>
+</svg>

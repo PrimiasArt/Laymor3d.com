@@ -1,0 +1,33 @@
+version: '3.9'
+
+services:
+  # 1. Laymor3D Main E-Commerce + AI Studio + /3dsim Static Host (Next.js 16)
+  laymor3d-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: laymor3d-web
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - SIMULATOR_BACKEND_URL=http://laymor3d-sim-api:8000
+    env_file:
+      - .env.local
+    depends_on:
+      - laymor3d-sim-api
+
+  # 2. 3D Simulator FastAPI Physics & AI Defect Telemetry Backend (/api/v1/*)
+  laymor3d-sim-api:
+    image: python:3.11-slim
+    container_name: laymor3d-sim-api
+    working_dir: /app
+    volumes:
+      - ./3dsim/backend:/app
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    restart: always
+    ports:
+      - "8000:8000"

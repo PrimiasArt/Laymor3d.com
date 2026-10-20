@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-planetarygear" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-planetarygear" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#d97706" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#d97706" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#f59e0b" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-planetarygear)" />
+  <rect width="600" height="400" fill="url(#glow-planetarygear)" />
+  
+  <!-- Perspective Print Bed Grid -->
+  <g stroke="#1f2937" stroke-width="1.2" opacity="0.6">
+    <path d="M50 340 L550 340 M100 365 L500 365 M150 385 L450 385" stroke-dasharray="6 4" />
+    <path d="M150 385 L50 340 M250 385 L200 340 M350 385 L400 340 M450 385 L550 340" />
+  </g>
+
+  <!-- Main Themed Illustration -->
+  <g filter="url(#shadow)">
+    
+    <!-- Outer Ring Gear -->
+    <circle cx="300" cy="200" r="115" fill="none" stroke="#d97706" stroke-width="18" stroke-dasharray="14 10" />
+    <circle cx="300" cy="200" r="125" fill="none" stroke="#f59e0b" stroke-width="4" />
+    <!-- Planet Gear 1 -->
+    <circle cx="300" cy="135" r="42" fill="#1e293b" stroke="#fbbf24" stroke-width="4" stroke-dasharray="8 6" />
+    <circle cx="300" cy="135" r="12" fill="#0f172a" stroke="#f59e0b" stroke-width="3" />
+    <!-- Planet Gear 2 -->
+    <circle cx="240" cy="240" r="42" fill="#1e293b" stroke="#fbbf24" stroke-width="4" stroke-dasharray="8 6" />
+    <circle cx="240" cy="240" r="12" fill="#0f172a" stroke="#f59e0b" stroke-width="3" />
+    <!-- Planet Gear 3 -->
+    <circle cx="360" cy="240" r="42" fill="#1e293b" stroke="#fbbf24" stroke-width="4" stroke-dasharray="8 6" />
+    <circle cx="360" cy="240" r="12" fill="#0f172a" stroke="#f59e0b" stroke-width="3" />
+    <!-- Sun Gear (Center) -->
+    <circle cx="300" cy="200" r="28" fill="#b45309" stroke="#fef3c7" stroke-width="3" stroke-dasharray="6 4" />
+    <circle cx="300" cy="200" r="8" fill="#f8fafc" />
+  
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#f59e0b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">MECHANICS</text>
+  <text x="576" y="41" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="end">PLANETARY GEAR</text>
+</svg>

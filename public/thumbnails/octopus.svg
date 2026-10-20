@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-cuteoctopus" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="60%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+    <radialGradient id="glow-cuteoctopus" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#db2777" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#db2777" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#ec4899" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg-cuteoctopus)" />
+  <rect width="600" height="400" fill="url(#glow-cuteoctopus)" />
+  
+  <!-- Perspective Print Bed Grid -->
+  <g stroke="#1f2937" stroke-width="1.2" opacity="0.6">
+    <path d="M50 340 L550 340 M100 365 L500 365 M150 385 L450 385" stroke-dasharray="6 4" />
+    <path d="M150 385 L50 340 M250 385 L200 340 M350 385 L400 340 M450 385 L550 340" />
+  </g>
+
+  <!-- Main Themed Illustration -->
+  <g filter="url(#shadow)">
+    
+    <!-- Head Dome -->
+    <path d="M210 210 C210 110, 390 110, 390 210 C390 240, 210 240, 210 210 Z" fill="#db2777" stroke="#f472b6" stroke-width="3" />
+    <!-- Kawaii Eyes -->
+    <circle cx="265" cy="185" r="14" fill="#0f172a" stroke="#ffffff" stroke-width="2" />
+    <circle cx="270" cy="180" r="5" fill="#ffffff" />
+    <circle cx="335" cy="185" r="14" fill="#0f172a" stroke="#ffffff" stroke-width="2" />
+    <circle cx="340" cy="180" r="5" fill="#ffffff" />
+    <!-- Cheeks & Smile -->
+    <circle cx="245" cy="205" r="8" fill="#fda4af" opacity="0.6" />
+    <circle cx="355" cy="205" r="8" fill="#fda4af" opacity="0.6" />
+    <path d="M292 200 Q300 210 308 200" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" />
+    <!-- Waving Tentacles -->
+    <path d="M220 225 Q180 260 190 290 Q200 320 240 310" fill="none" stroke="#be185d" stroke-width="16" stroke-linecap="round" />
+    <path d="M250 230 Q250 280 270 315" fill="none" stroke="#db2777" stroke-width="16" stroke-linecap="round" />
+    <path d="M300 230 Q300 290 310 325" fill="none" stroke="#ec4899" stroke-width="16" stroke-linecap="round" />
+    <path d="M350 230 Q350 280 340 315" fill="none" stroke="#db2777" stroke-width="16" stroke-linecap="round" />
+    <path d="M380 225 Q420 260 410 290 Q400 320 360 310" fill="none" stroke="#be185d" stroke-width="16" stroke-linecap="round" />
+  
+  </g>
+
+  <!-- Badges -->
+  <rect x="24" y="24" width="auto" height="26" rx="6" fill="#1e293b" stroke="#334155" opacity="0.9" />
+  <text x="36" y="41" fill="#ec4899" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" letter-spacing="1.5">TOYS & ANIMALS</text>
+  <text x="576" y="41" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="end">CUTE OCTOPUS</text>
+</svg>
