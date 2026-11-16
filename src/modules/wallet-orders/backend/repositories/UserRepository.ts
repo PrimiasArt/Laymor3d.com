@@ -2,6 +2,7 @@ import {
   IUser,
   UserRole,
   INITIAL_USERS,
+  AI_TRAINER_ACCOUNTS,
   MASTER_ADMIN_CREDENTIALS,
   DEFAULT_USER_FEATURE_PERMISSIONS,
   IUserFeaturePermissions,
@@ -63,6 +64,20 @@ class UserRepository {
         allowedModules: { ...masterTemplate.allowedModules },
         allowedFeatures: { ...masterTemplate.allowedFeatures },
       };
+    }
+
+    // Đảm bảo 3 tài khoản AI Trainer mặc định luôn tồn tại ngay cả khi nạp snapshot cũ
+    for (const trainer of AI_TRAINER_ACCOUNTS) {
+      const hasTrainer = this.users.some(
+        (u) => u.id === trainer.id || u.username === trainer.username
+      );
+      if (!hasTrainer) {
+        this.users.push({
+          ...trainer,
+          allowedModules: trainer.allowedModules ? { ...trainer.allowedModules } : undefined,
+          allowedFeatures: trainer.allowedFeatures ? { ...trainer.allowedFeatures } : undefined,
+        });
+      }
     }
 
     // Đảm bảo tất cả user đều có username, allowedModules và allowedFeatures hợp lệ

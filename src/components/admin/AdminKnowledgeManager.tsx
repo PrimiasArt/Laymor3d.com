@@ -18,6 +18,7 @@ import {
   UserCheck,
   Sparkles,
 } from '@/components/icons/MinimalIcons';
+import { Download, Upload, FileSpreadsheet } from 'lucide-react';
 import { IKnowledgeEntry, KnowledgeCategory, ISlicerParameterOverride } from '@/backend/domain/knowledge';
 
 export function AdminKnowledgeManager() {
@@ -52,6 +53,58 @@ export function AdminKnowledgeManager() {
   const [newOverridesJson, setNewOverridesJson] = useState('{\n  "retractionDistanceMm": 0.8,\n  "nozzleTemp": 220\n}');
   const [newIsVerified, setNewIsVerified] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isImportingExcel, setIsImportingExcel] = useState(false);
+  const [importPublishNow, setImportPublishNow] = useState(false);
+  const [excelFeedback, setExcelFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const excelInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const handleExportExcel = (templateOnly = false) => {
+    const qs = new URLSearchParams();
+    if (templateOnly) {
+      qs.set('template', '1');
+    } else {
+      if (selectedStatus !== 'all') qs.set('status', selectedStatus);
+      if (selectedCategory !== 'all') qs.set('category', selectedCategory);
+    }
+    window.location.href = `/api/knowledge/excel?${qs.toString()}`;
+  };
+
+  const handleImportExcelFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setIsImportingExcel(true);
+    setExcelFeedback(null);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('publishImmediately', importPublishNow ? 'true' : 'false');
+      const res = await fetch('/api/knowledge/excel', {
+        method: 'POST',
+        credentials: 'include',
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setExcelFeedback({
+          kind: 'err',
+          text: data.error || 'Không thể nhập dữ liệu từ file Excel/CSV.',
+        });
+      } else {
+        setExcelFeedback({
+          kind: 'ok',
+          text:
+            data.message +
+            (data.errorCount > 0 ? ` (${data.errorCount} dòng bị bỏ qua do thiếu tiêu đề/giải pháp)` : ''),
+        });
+        await fetchKnowledge();
+      }
+    } catch (err: any) {
+      setExcelFeedback({ kind: 'err', text: err?.message || 'Lỗi tải lên file Excel.' });
+    } finally {
+      setIsImportingExcel(false);
+    }
+  };
 
   const fetchKnowledge = async () => {
     setIsLoading(true);
@@ -285,7 +338,56 @@ export function AdminKnowledgeManager() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5 self-start md:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+          <input
+            ref={excelInputRef}
+            type="file"
+            accept=".xlsx,.csv"
+            onChange={handleImportExcelFile}
+            className="hidden"
+          />
+
+          <button
+            type="button"
+            onClick={() => handleExportExcel(true)}
+            className="px-3.5 py-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+            title="Tải file Excel mẫu có sẵn hướng dẫn cột để gửi người dùng nhập thủ công"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+            <span>Tải File Mẫu (.xlsx)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleExportExcel(false)}
+            className="px-3.5 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+            title="Xuất kho tri thức AI ra file Microsoft Excel (.xlsx)"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Xuất Excel (.xlsx)</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={isImportingExcel}
+            onClick={() => excelInputRef.current?.click()}
+            className="px-3.5 py-2 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer disabled:opacity-50"
+            title="Nhập hàng loạt tri thức từ file Excel (.xlsx) hoặc CSV (.csv)"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>{isImportingExcel ? 'Đang nhập...' : 'Nhập Excel (.xlsx)'}</span>
+          </button>
+
+          <label className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-50 border border-slate-200 text-[11px] font-semibold text-slate-700 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={importPublishNow}
+              onChange={(e) => setImportPublishNow(e.target.checked)}
+              className="rounded cursor-pointer"
+            />
+            <span>Duyệt ngay khi Import</span>
+          </label>
+
           <button
             type="button"
             onClick={openCreateModal}
@@ -306,6 +408,25 @@ export function AdminKnowledgeManager() {
           </button>
         </div>
       </div>
+
+      {excelFeedback && (
+        <div
+          className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-between ${
+            excelFeedback.kind === 'err'
+              ? 'bg-rose-50 border-rose-200 text-rose-700'
+              : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+          }`}
+        >
+          <span>{excelFeedback.text}</span>
+          <button
+            type="button"
+            onClick={() => setExcelFeedback(null)}
+            className="underline text-[11px] ml-3 cursor-pointer"
+          >
+            Đóng
+          </button>
+        </div>
+      )}
 
       {/* KPI Stats Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

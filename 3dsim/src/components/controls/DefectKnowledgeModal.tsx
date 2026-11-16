@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ISimulationProfile,
   DefectCategoryType,
@@ -73,6 +73,62 @@ export function DefectKnowledgeModal({
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [statusKind, setStatusKind] = useState<'info' | 'error'>('info');
+  const [excelUploading, setExcelUploading] = useState(false);
+  const excelInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleExportExcel = (templateOnly = false) => {
+    window.location.href = templateOnly
+      ? '/api/knowledge/excel?template=1'
+      : '/api/knowledge/excel';
+  };
+
+  const handleImportExcelFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!currentUser) {
+      showMessage('Vui lòng đăng nhập tài khoản Laymor3D / AI Trainer trước khi nhập Excel.', 'error');
+      setActiveTab('login');
+      return;
+    }
+
+    setExcelUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('publishImmediately', isAdmin ? 'true' : 'false');
+      const res = await fetch('/api/knowledge/excel', {
+        method: 'POST',
+        credentials: 'include',
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        showMessage(data.error || 'Không thể nhập file Excel.', 'error');
+        return;
+      }
+
+      if (Array.isArray(data.entries)) {
+        for (const item of data.entries) {
+          if (item?.id && !item.isVerified) {
+            setRulePersonalSandbox(item.id, true);
+          }
+        }
+      }
+
+      const updated = await fetchLearnedDefectRulesFromDB();
+      syncRulesToParent(updated);
+      showMessage(
+        data.message ||
+          `✓ Đã nhập ${data.importedCount || 0} quy tắc từ Excel lên hệ thống chờ duyệt!`
+      );
+      setActiveTab('database');
+    } catch (err: any) {
+      showMessage('Lỗi import Excel: ' + (err?.message || err), 'error');
+    } finally {
+      setExcelUploading(false);
+    }
+  };
   const [storageInfo, setStorageInfo] = useState(getKnowledgeStorageInfo());
 
   // User / Admin Session State
@@ -490,11 +546,46 @@ export function DefectKnowledgeModal({
             </button>
           </div>
 
-          {isAdmin && (
-            <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-emerald-400 text-[10px] font-mono font-bold uppercase">
-              ★ Master Admin (Kiểm duyệt &amp; Phát hành AI)
-            </span>
-          )}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <input
+              ref={excelInputRef}
+              type="file"
+              accept=".xlsx,.csv"
+              onChange={handleImportExcelFile}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => handleExportExcel(true)}
+              className="px-2.5 py-1 rounded-lg studio-card hover:bg-[var(--bg-hover)] text-[11px] font-semibold studio-text-primary cursor-pointer border studio-border"
+              title="Tải file Excel (.xlsx) mẫu có hướng dẫn cột cho người dùng nhập thủ công"
+            >
+              📄 Tải Mẫu Excel
+            </button>
+            <button
+              type="button"
+              onClick={() => handleExportExcel(false)}
+              className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 text-[11px] font-semibold cursor-pointer"
+              title="Xuất kho tri thức ra file Excel (.xlsx)"
+            >
+              ⬇ Xuất Excel (.xlsx)
+            </button>
+            <button
+              type="button"
+              disabled={excelUploading}
+              onClick={() => excelInputRef.current?.click()}
+              className="px-2.5 py-1 rounded-lg studio-cta-primary text-[11px] font-bold cursor-pointer disabled:opacity-50"
+              title="Nhập hàng loạt tri thức từ file Excel (.xlsx / .csv) → Tự động đưa lên hàng chờ Admin duyệt"
+            >
+              {excelUploading ? 'Đang nhập...' : '⬆ Nhập Excel (.xlsx)'}
+            </button>
+
+            {isAdmin && (
+              <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-emerald-400 text-[10px] font-mono font-bold uppercase">
+                ★ Master Admin (Kiểm duyệt &amp; Phát hành AI)
+              </span>
+            )}
+          </div>
         </div>
 
         {statusMsg && (
