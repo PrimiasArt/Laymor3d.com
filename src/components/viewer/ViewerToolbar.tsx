@@ -16,6 +16,9 @@ interface ViewerToolbarProps {
   onColorChange: (color: string) => void;
   onLightingChange: (val: number) => void;
   onExportSTL?: () => void;
+  supportEnabled?: boolean;
+  onQuickGenerateTreeSupport?: () => void;
+  onPreviewLiveCppTree?: () => void;
 }
 
 const COLOR_PRESETS = [
@@ -37,11 +40,42 @@ export function ViewerToolbar({
   onSetOrientation,
   onRotateStep,
   onColorChange,
+  supportEnabled,
+  onQuickGenerateTreeSupport,
+  onPreviewLiveCppTree,
 }: ViewerToolbarProps) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 vision-glass rounded-2xl text-white">
       {/* Toggles & View Mode */}
       <div className="flex flex-wrap items-center gap-1.5">
+        {/* External 1-Click Tree Support Action right under 3D Canvas */}
+        {onQuickGenerateTreeSupport && (
+          <button
+            type="button"
+            onClick={onQuickGenerateTreeSupport}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all border cursor-pointer ${
+              supportEnabled
+                ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-sm'
+                : 'bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 border-emerald-400/50 shadow-xs'
+            }`}
+            title="Bật / Sinh ngay cấu trúc Tree Support trực tiếp ngoài màn hình 3D"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>{supportEnabled ? 'Tree Support: BẬT' : '+ Sinh Tree Support'}</span>
+          </button>
+        )}
+
+        {onPreviewLiveCppTree && (
+          <button
+            type="button"
+            onClick={onPreviewLiveCppTree}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all border bg-amber-400/20 hover:bg-amber-400 text-amber-200 hover:text-slate-950 border-amber-300/40 cursor-pointer"
+            title="Xem trước trực tiếp cành Tree Support C++ hữu cơ ngay tại khung 3D"
+          >
+            <span>Preview Tree C++</span>
+          </button>
+        )}
+
         {/* Slicer Toolpath Mode Toggle */}
         {onToggleViewMode && (
           <button

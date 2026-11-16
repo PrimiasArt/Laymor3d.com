@@ -105,6 +105,15 @@ interface PrintSimulatorViewportProps {
     percent: number | null;
     label: string | null;
   }) => void;
+  treeResliceNonce?: number;
+  isTreeQuickPopoverOpen?: boolean;
+  onSetTreeQuickPopoverOpen?: (open: boolean) => void;
+  onGenerateTreeSupport?: (opts?: {
+    forceReslice?: boolean;
+    openPopover?: boolean;
+    patch?: Partial<ISimulationProfile>;
+  }) => void;
+  onChangeProfile?: (patch: Partial<ISimulationProfile>) => void;
 }
 
 export function PrintSimulatorViewport({
@@ -149,6 +158,11 @@ export function PrintSimulatorViewport({
   onImportBambuGcode,
   onOrcaStatsReady,
   onOrcaStatusChange,
+  treeResliceNonce = 0,
+  isTreeQuickPopoverOpen = false,
+  onSetTreeQuickPopoverOpen,
+  onGenerateTreeSupport,
+  onChangeProfile,
 }: PrintSimulatorViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -1035,8 +1049,10 @@ export function PrintSimulatorViewport({
   // 2.5.6 Nhân C++ OrcaSlicer WASM (TreeSupport3D + WebGPU + Pthread) tự động giải nhánh Tree Support 3D & Sợi đùn GPU
   useEffect(() => {
     const pathStr = String((currentModel as any)?.path || '');
+    const cachedNative = getCachedNativeSupport(currentModel?.name || currentModel?.id, pathStr);
     const isExplicitBambuGcode =
-      pathStr.startsWith('bambu-gcode-') || pathStr.startsWith('bambu-native-');
+      (pathStr.startsWith('bambu-gcode-') || pathStr.startsWith('bambu-native-')) &&
+      (profile.supportMode === 'none' || Boolean(cachedNative && cachedNative.segments.length > 0));
     if (isExplicitBambuGcode) {
       orcaSliceBundleRef.current = null;
       setOrcaSliceBundle(null);
@@ -1230,6 +1246,7 @@ export function PrintSimulatorViewport({
     profile.printSpeed,
     profile.nozzleTemp,
     profile.bedTemp,
+    treeResliceNonce,
   ]);
 
   // 2.6 Đồng bộ Transform khi người dùng tương tác với Bảng Điều Khiển Bàn In hoặc Kéo chuột
@@ -1886,21 +1903,99 @@ export function PrintSimulatorViewport({
               </>
             )}
 
-            {onToggleSupport && profile.supportMode !== 'none' && (
+            {/* External 1-Click Tree Support Generator + Live Preview Toggle + Quick Tuner */}
+            {slicingProgressPct !== null ? (
               <button
                 type="button"
-                data-testid="viewport-toggle-support-btn"
-                onClick={onToggleSupport}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
-                  showSupport
-                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/35'
-                    : 'studio-pill-inactive'
-                }`}
-                title="Ẩn/Hiện cấu trúc Cây Đỡ (OrcaSlicer C++ Tree Support)"
+                data-testid="viewport-tree-generating-pill"
+                onClick={() => onSetTreeQuickPopoverOpen?.(!isTreeQuickPopoverOpen)}
+                className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border border-emerald-500/40 text-[10px] font-mono font-bold transition-all cursor-pointer whitespace-nowrap"
+                title={orcaProgressLabel || 'Đang dựng nhánh Tree Support C++ trực tiếp trên bàn in...'}
               >
-                <IconSupport size={12} />
-                <span>Cây Đỡ</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
+                <span>
+                  {profile.supportMode === 'tree'
+                    ? `Đang sinh Tree ${slicingProgressPct}%`
+                    : `Đang cắt lát ${slicingProgressPct}%`}
+                </span>
               </button>
+            ) : profile.supportMode !== 'tree' ? (
+              <div className="flex items-center rounded-full bg-emerald-500/15 border border-emerald-500/40 overflow-hidden">
+                <button
+                  type="button"
+                  data-testid="viewport-generate-tree-btn"
+                  onClick={() => onGenerateTreeSupport?.({ forceReslice: true, openPopover: true })}
+                  className="flex items-center gap-1 pl-2.5 pr-2 py-0.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[10px] font-bold transition-all cursor-pointer whitespace-nowrap"
+                  title="Bấm 1 chạm để sinh ngay Tree Support C++ & xem trước trực tiếp trên bàn in 3D"
+                >
+                  <IconSupport size={12} />
+                  <span>+ Sinh Tree Support</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="viewport-tree-popover-btn"
+                  onClick={() => onSetTreeQuickPopoverOpen?.(!isTreeQuickPopoverOpen)}
+                  className="px-1.5 py-0.5 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/20 text-[10px] font-bold transition-colors cursor-pointer"
+                  title="Mở bảng chỉnh nhanh Tree Support nổi (vừa chỉnh vừa xem trực tiếp 3D)"
+                >
+                  <IconChevronDown
+                    className={`w-3 h-3 transition-transform ${isTreeQuickPopoverOpen ? 'rotate-180' : ''}`}
+                  />
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center rounded-full bg-emerald-500/10 border border-emerald-500/35 overflow-hidden">
+                {onToggleSupport && (
+                  <button
+                    type="button"
+                    data-testid="viewport-toggle-support-btn"
+                    onClick={onToggleSupport}
+                    className={`flex items-center gap-1 pl-2 pr-1.5 py-0.5 text-[10px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                      showSupport
+                        ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'
+                        : 'studio-pill-inactive opacity-75'
+                    }`}
+                    title="Bấm để Hiện / Ẩn tức thì cấu trúc Cây Đỡ (So sánh trước & sau ngay trên màn hình)"
+                  >
+                    <IconSupport size={12} />
+                    <span>{showSupport ? `Cây Đỡ (${supportGrams}g)` : 'Cây Đỡ: Ẩn'}</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  data-testid="viewport-regenerate-tree-btn"
+                  onClick={() => onGenerateTreeSupport?.({ forceReslice: true })}
+                  className={`px-1.5 py-0.5 border-l border-emerald-500/25 text-[10px] font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    Math.abs(modelTransform.rotation[0]) > 1e-4 ||
+                    Math.abs(modelTransform.rotation[1]) > 1e-4 ||
+                    Math.abs(modelTransform.rotation[2]) > 1e-4 ||
+                    Math.abs(modelTransform.scale - 1) > 1e-4
+                      ? 'bg-amber-500 text-slate-950 animate-pulse'
+                      : 'text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/25'
+                  }`}
+                  title="Sinh lại Tree Support C++ ngay cho góc xoay & tỷ lệ hiện tại của mẫu"
+                >
+                  ↻ Sinh lại
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="viewport-tree-popover-btn"
+                  onClick={() => onSetTreeQuickPopoverOpen?.(!isTreeQuickPopoverOpen)}
+                  className={`flex items-center gap-0.5 px-1.5 py-0.5 border-l border-emerald-500/25 text-[10px] font-semibold transition-colors cursor-pointer ${
+                    isTreeQuickPopoverOpen
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/20'
+                  }`}
+                  title="Chỉnh nhanh kiểu nhánh, góc đỡ & xem kết quả trực tiếp trên 3D"
+                >
+                  <span className="hidden md:inline">Chỉnh</span>
+                  <IconChevronDown
+                    className={`w-3 h-3 transition-transform ${isTreeQuickPopoverOpen ? 'rotate-180' : ''}`}
+                  />
+                </button>
+              </div>
             )}
 
             {onToggleToolhead && (
@@ -1937,6 +2032,235 @@ export function PrintSimulatorViewport({
           </div>
         </div>
       </div>
+
+      {/* 1.6. Non-Blocking Floating Tree Support Live-Preview Quick Controller (Không che khuất mẫu 3D ở giữa bàn in!) */}
+      {isTreeQuickPopoverOpen && (
+        <div
+          data-testid="floating-tree-quick-popover"
+          className="absolute top-14 left-2.5 sm:left-3.5 z-30 w-[min(296px,calc(100vw-20px))] rounded-2xl glass-panel p-3 space-y-2.5 shadow-2xl border border-emerald-500/30 pointer-events-auto animate-in fade-in duration-150"
+        >
+          <div className="flex items-center justify-between border-b studio-border pb-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <IconSupport size={13} className="text-emerald-500 shrink-0" />
+              <span className="text-[11px] font-bold studio-text-primary truncate">
+                Tree Support (Live 3D)
+              </span>
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 dark:text-emerald-400 border border-emerald-500/30 font-semibold shrink-0">
+                {profile.supportMode === 'none' ? 'Đang tắt' : `${supportGrams}g`}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onSetTreeQuickPopoverOpen?.(false)}
+              className="p-1 rounded-lg studio-text-muted hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+              title="Thu gọn bảng chỉnh nhanh"
+            >
+              <IconClose className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Primary 1-Click Generate & Live Preview Row */}
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              data-testid="quick-popover-generate-tree-btn"
+              disabled={slicingProgressPct !== null}
+              onClick={() => onGenerateTreeSupport?.({ forceReslice: true })}
+              className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 text-[11px] font-bold transition-all cursor-pointer shadow-xs"
+              title="Cố định góc xoay hiện tại & chạy nhân OrcaSlicer C++ dựng Tree Support ngay trước mắt"
+            >
+              <IconSupport size={12} />
+              <span>
+                {slicingProgressPct !== null
+                  ? `Đang sinh ${slicingProgressPct}%...`
+                  : profile.supportMode === 'tree'
+                  ? '↻ Sinh Lại Tree Ngay'
+                  : '⚡ Sinh Tree C++ Ngay'}
+              </span>
+            </button>
+
+            {onToggleSupport && profile.supportMode !== 'none' && (
+              <button
+                type="button"
+                onClick={onToggleSupport}
+                className={`px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all cursor-pointer shrink-0 ${
+                  showSupport
+                    ? 'studio-card studio-text-primary hover:border-emerald-500/40'
+                    : 'bg-amber-500/15 text-amber-500 border-amber-500/35'
+                }`}
+                title="Tạm ẩn/hiện cây đỡ để soi kỹ bề mặt dưới mẫu 3D"
+              >
+                {showSupport ? 'Tạm ẩn' : 'Hiện lại'}
+              </button>
+            )}
+          </div>
+
+          {/* Support Mode Switcher */}
+          <div className="grid grid-cols-3 gap-1 p-0.5 rounded-xl bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
+            {(
+              [
+                { id: 'none', label: 'Tắt' },
+                { id: 'tree', label: 'Tree C++' },
+                { id: 'normal', label: 'Trụ Lưới' },
+              ] as const
+            ).map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => {
+                  if (m.id === 'tree') {
+                    onGenerateTreeSupport?.({ forceReslice: false });
+                  } else {
+                    onChangeProfile?.({ supportMode: m.id });
+                  }
+                }}
+                className={`py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                  profile.supportMode === m.id ? 'studio-pill-active' : 'studio-pill-inactive'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+
+          {profile.supportMode === 'tree' && (
+            <>
+              {/* 4 Organic Styles */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="font-semibold studio-text-secondary">Kiểu cành Tree:</span>
+                  <span className="font-mono text-emerald-500 dark:text-emerald-400 font-semibold">
+                    {profile.treeStyle || 'organic'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-4 gap-1">
+                  {(
+                    [
+                      { id: 'organic', label: 'Organic' },
+                      { id: 'slim', label: 'Slim' },
+                      { id: 'strong', label: 'Strong' },
+                      { id: 'hybrid', label: 'Hybrid' },
+                    ] as const
+                  ).map((st) => {
+                    const active = (profile.treeStyle || 'organic') === st.id;
+                    return (
+                      <button
+                        key={st.id}
+                        type="button"
+                        onClick={() =>
+                          onGenerateTreeSupport?.({
+                            forceReslice: false,
+                            patch: { treeStyle: st.id },
+                          })
+                        }
+                        className={`py-1 rounded-lg text-[10px] font-semibold border transition-all cursor-pointer ${
+                          active
+                            ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border-emerald-500/45 font-bold'
+                            : 'studio-card studio-text-secondary hover:text-[var(--text-primary)]'
+                        }`}
+                      >
+                        {st.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Overhang Angle Threshold Slider + Live Heatmap Toggle */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="font-semibold studio-text-secondary">
+                    Góc cần đỡ:{' '}
+                    <strong className="font-mono studio-text-primary">
+                      {profile.supportAngleThreshold ?? 30}°
+                    </strong>
+                  </span>
+                  {onToggleHeatmap && (
+                    <button
+                      type="button"
+                      onClick={onToggleHeatmap}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition-colors cursor-pointer ${
+                        showHeatmap
+                          ? 'bg-rose-500/20 text-rose-500 border border-rose-500/35'
+                          : 'studio-text-gold hover:underline'
+                      }`}
+                      title="Tô màu đỏ vùng nghiêng Overhang ngay trên mẫu 3D để dễ chọn góc đỡ"
+                    >
+                      {showHeatmap ? '● Đang soi vùng đỏ' : 'Soi vùng đỏ'}
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="range"
+                  min={10}
+                  max={55}
+                  step={5}
+                  value={profile.supportAngleThreshold ?? 30}
+                  onChange={(e) =>
+                    onChangeProfile?.({ supportAngleThreshold: Number(e.target.value) })
+                  }
+                  className="w-full accent-emerald-500 cursor-pointer h-1.5"
+                />
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { deg: 15, label: '15° Ít' },
+                    { deg: 30, label: '30° Chuẩn' },
+                    { deg: 45, label: '45° Kỹ' },
+                  ].map((preset) => (
+                    <button
+                      key={preset.deg}
+                      type="button"
+                      onClick={() =>
+                        onChangeProfile?.({ supportAngleThreshold: preset.deg })
+                      }
+                      className={`py-0.5 rounded text-[9px] font-mono transition-colors cursor-pointer ${
+                        (profile.supportAngleThreshold ?? 30) === preset.deg
+                          ? 'bg-emerald-500/20 text-emerald-500 font-bold border border-emerald-500/35'
+                          : 'studio-card studio-text-muted hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Branch Diameter + Build Plate Only */}
+              <div className="space-y-1.5 pt-1 border-t studio-border">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="studio-text-secondary">Đường kính thân nhánh:</span>
+                  <span className="font-mono font-bold studio-text-primary">
+                    {(profile.supportBranchDiameter ?? 2.2).toFixed(1)} mm
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={1.2}
+                  max={4.0}
+                  step={0.2}
+                  value={profile.supportBranchDiameter ?? 2.2}
+                  onChange={(e) =>
+                    onChangeProfile?.({ supportBranchDiameter: Number(e.target.value) })
+                  }
+                  className="w-full accent-emerald-500 cursor-pointer h-1.5"
+                />
+
+                <label className="flex items-center justify-between gap-2 text-[10px] studio-text-secondary cursor-pointer pt-0.5">
+                  <span>Chỉ mọc từ mặt bàn in (không sẹo mẫu)</span>
+                  <input
+                    type="checkbox"
+                    checked={profile.supportOnBuildPlateOnly !== false}
+                    onChange={(e) =>
+                      onChangeProfile?.({ supportOnBuildPlateOnly: e.target.checked })
+                    }
+                    className="accent-emerald-500 rounded cursor-pointer"
+                  />
+                </label>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Drag & Drop Overlay */}
       {isDraggingFile && (

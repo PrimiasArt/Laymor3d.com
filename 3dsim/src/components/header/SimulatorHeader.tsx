@@ -83,6 +83,7 @@ interface SimulatorHeaderProps {
   currentUser?: ILaymorUser | null;
   onOpenAuthModal?: () => void;
   orcaStatus?: IOrcaEngineHeaderStatus;
+  onQuickGenerateTree?: () => void;
 }
 
 export function SimulatorHeader({
@@ -124,6 +125,7 @@ export function SimulatorHeader({
   currentUser,
   onOpenAuthModal,
   orcaStatus,
+  onQuickGenerateTree,
 }: SimulatorHeaderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isStudioMenuOpen, setIsStudioMenuOpen] = useState(false);
@@ -643,24 +645,42 @@ export function SimulatorHeader({
             3. CỤM PHẢI: TRẠNG THÁI C++, AI, CÔNG CỤ, TÀI KHOẢN & XUẤT FILE (1 DÒNG GỌN GÀNG)
            ===================================================================== */}
         <div className="order-2 lg:order-3 flex items-center gap-1 sm:gap-1.5 shrink-0 ml-auto lg:ml-0">
-          {/* Live OrcaSlicer C++ WASM Status Indicator */}
+          {/* External 1-Click Tree Support Action & Live C++ Status Button */}
           {orcaStatus?.active ? (
-            <div
-              className="hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-500 dark:text-emerald-400 text-[10px] font-mono font-semibold shrink-0"
-              title={orcaStatus.label || 'OrcaSlicer C++ WASM đang tính toán Tree Support...'}
+            <button
+              type="button"
+              data-testid="header-tree-support-btn"
+              onClick={onQuickGenerateTree}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-500 dark:text-emerald-400 text-[11px] font-mono font-bold shrink-0 cursor-pointer"
+              title={orcaStatus.label || 'OrcaSlicer C++ WASM đang dựng Tree Support trực tiếp...'}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-              <span>{orcaStatus.percent !== null ? `${orcaStatus.percent}%` : 'C++'}</span>
-            </div>
-          ) : orcaStatus?.ready ? (
-            <div
-              className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-600 dark:text-emerald-400 text-[10px] font-mono font-semibold shrink-0"
-              title={orcaStatus.label || 'Đã dựng Tree Support & G-code bằng nhân OrcaSlicer C++ WASM chính gốc'}
+              <span className="whitespace-nowrap">
+                {orcaStatus.percent !== null
+                  ? hasSupport
+                    ? `Tree ${orcaStatus.percent}%`
+                    : `Cắt ${orcaStatus.percent}%`
+                  : 'Đang cắt...'}
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-testid="header-tree-support-btn"
+              onClick={onQuickGenerateTree}
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer shrink-0 ${
+                hasSupport && showSupport
+                  ? 'bg-emerald-500/15 border border-emerald-500/35 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/25'
+                  : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-xs'
+              }`}
+              title="Sinh ngay Tree Support C++ & Mở bảng chỉnh nhanh xem trước trực tiếp ngoài màn hình 3D"
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-              <span>Orca C++</span>
-            </div>
-          ) : null}
+              <IconSupport size={12} className="shrink-0" />
+              <span className="whitespace-nowrap">
+                {hasSupport && showSupport ? 'Tree C++' : 'Sinh Tree'}
+              </span>
+            </button>
+          )}
 
           {/* Quick AI Consultant Button */}
           <button

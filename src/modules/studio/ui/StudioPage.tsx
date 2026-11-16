@@ -728,7 +728,7 @@ function StudioInner() {
                 />
               </div>
 
-              {/* Interactive Toolbar below Canvas (With Slicer Toolpath Mode & Auto-Orientation) */}
+              {/* Interactive Toolbar below Canvas (With External 1-Click Tree Support, Slicer Toolpath Mode & Auto-Orientation) */}
               <ViewerToolbar
                 options={viewerOptions}
                 onToggleWireframe={toggleWireframe}
@@ -740,6 +740,15 @@ function StudioInner() {
                 onRotateStep={rotateStep}
                 onColorChange={setMaterialColor}
                 onLightingChange={setLightingIntensity}
+                supportEnabled={supportConfig.enabled && supportConfig.type === 'tree'}
+                onQuickGenerateTreeSupport={() => {
+                  const isTreeOn = supportConfig.enabled && supportConfig.type === 'tree';
+                  updateSupport({ enabled: !isTreeOn, type: 'tree' });
+                }}
+                onPreviewLiveCppTree={() => {
+                  updateSupport({ enabled: true, type: 'tree' });
+                  setViewportEngine('printsim_pro');
+                }}
                 onExportSTL={() =>
                   PresetGeneratorService.downloadSTL(
                     customModel ? customModel.fileName : selectedModelId,

@@ -92,7 +92,7 @@ import {
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { ISliceResponse } from '@/services/localSlicerService';
 import { useTelemetryLogger } from '@/hooks/useTelemetryLogger';
-import { IconAxis, IconLayers, IconToolpath } from '@/components/icons/MinimalIcons';
+import { IconAxis, IconLayers, IconToolpath, IconSupport } from '@/components/icons/MinimalIcons';
 import { useLaymorAuth } from '@/hooks/useLaymorAuth';
 import { LaymorAuthModal } from '@/components/controls/LaymorAuthModal';
 
@@ -260,8 +260,87 @@ export default function App() {
     percent: null,
     label: null,
   });
+  const [treeResliceNonce, setTreeResliceNonce] = useState<number>(0);
+  const [isTreeQuickPopoverOpen, setIsTreeQuickPopoverOpen] = useState<boolean>(false);
   const bambuGcodeInputRef = useRef<HTMLInputElement | null>(null);
   const isEmbedded = embedProtocol.getIsEmbedded();
+
+  const handleGenerateTreeSupport = useCallback(
+    (opts?: {
+      forceReslice?: boolean;
+      openPopover?: boolean;
+      patch?: Partial<ISimulationProfile>;
+    }) => {
+      // 1. Nếu người dùng vừa xoay góc hoặc đổi tỷ lệ mô hình, nướng (bake) hướng xoay & đặt sát bàn in Y=0 để cành Tree mọc thẳng đứng chuẩn xác!
+      const [rx, ry, rz] = modelTransform.rotation;
+      const sc = modelTransform.scale;
+      if (
+        Math.abs(rx) > 1e-4 ||
+        Math.abs(ry) > 1e-4 ||
+        Math.abs(rz) > 1e-4 ||
+        Math.abs(sc - 1) > 1e-4
+      ) {
+        const baked = baseGeometry.clone();
+        const mat = new THREE.Matrix4().compose(
+          new THREE.Vector3(0, 0, 0),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz)),
+          new THREE.Vector3(sc, sc, sc)
+        );
+        baked.applyMatrix4(mat);
+        baked.computeVertexNormals();
+        baked.computeBoundingBox();
+        const b = baked.boundingBox;
+        if (b) {
+          const cx = (b.min.x + b.max.x) * 0.5;
+          const cz = (b.min.z + b.max.z) * 0.5;
+          baked.translate(-cx, -b.min.y, -cz);
+          baked.computeBoundingBox();
+        }
+        setBaseGeometry(baked);
+        setModelTransform((prev) => ({
+          ...prev,
+          rotation: [0, 0, 0],
+          scale: 1,
+        }));
+      }
+
+      // 2. Mở khóa trường hợp file .3mf có nhúng G-code tĩnh để nhân OrcaSlicer C++ WASM tính toán Tree Support mới trực tiếp
+      setCurrentModel((prev) => {
+        const p = String(prev.path || '');
+        if (p.startsWith('bambu-native-') || p.startsWith('bambu-gcode-')) {
+          return { ...prev, path: undefined };
+        }
+        return prev;
+      });
+
+      if (opts?.forceReslice) {
+        clearOrcaWasmCaches();
+        setTreeResliceNonce((n) => n + 1);
+      }
+
+      setShowSupport(true);
+      setProfile((prev) => ({
+        ...prev,
+        supportMode: 'tree',
+        treeStyle: prev.treeStyle || 'organic',
+        ...(opts?.patch || {}),
+      }));
+
+      setViewMode((prevMode) => (prevMode === 'prepare' ? 'cad' : prevMode));
+      setSimulationState((prev) => ({
+        ...prev,
+        currentProgress: 1.0,
+        currentLayer: prev.totalLayers,
+        isPlaying: false,
+        isCompleted: true,
+      }));
+
+      if (opts?.openPopover !== undefined) {
+        setIsTreeQuickPopoverOpen(opts.openPopover);
+      }
+    },
+    [baseGeometry, modelTransform]
+  );
 
   const handleOrcaStatsReady = useCallback((stats: IOrcaWasmSliceStats) => {
     setHasNativeBambuSupport(true);
@@ -1452,6 +1531,13 @@ export default function App() {
         currentUser={currentUser}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         orcaStatus={orcaStatus}
+        onQuickGenerateTree={() => {
+          if (profile.supportMode !== 'tree' || !showSupport) {
+            handleGenerateTreeSupport({ forceReslice: true, openPopover: true });
+          } else {
+            setIsTreeQuickPopoverOpen((prev) => !prev);
+          }
+        }}
       />
 
       {/* Hidden File Input để nạp trực tiếp file .gcode.3mf / .gcode từ Bambu Studio */}
@@ -1563,6 +1649,11 @@ export default function App() {
               onImportBambuGcode={() => bambuGcodeInputRef.current?.click()}
               onOrcaStatsReady={handleOrcaStatsReady}
               onOrcaStatusChange={setOrcaStatus}
+              treeResliceNonce={treeResliceNonce}
+              isTreeQuickPopoverOpen={isTreeQuickPopoverOpen}
+              onSetTreeQuickPopoverOpen={setIsTreeQuickPopoverOpen}
+              onGenerateTreeSupport={handleGenerateTreeSupport}
+              onChangeProfile={(updated) => setProfile((prev) => ({ ...prev, ...updated }))}
             />
           </main>
 
@@ -1592,6 +1683,18 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 ml-auto">
+                  <button
+                    type="button"
+                    data-testid="prepare-generate-tree-btn"
+                    onClick={() =>
+                      handleGenerateTreeSupport({ forceReslice: true, openPopover: true })
+                    }
+                    className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[11px] sm:text-xs transition-all cursor-pointer shadow-xs"
+                    title="Cố định góc xoay hiện tại, sinh Tree Support C++ & xem trực tiếp trên 3D ngay"
+                  >
+                    <IconSupport className="w-3.5 h-3.5 shrink-0" />
+                    <span>Sinh Tree Support Ngay</span>
+                  </button>
                   <button
                     onClick={() => setViewMode('cad')}
                     className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl studio-cta-primary font-bold text-[11px] sm:text-xs transition-all cursor-pointer"
