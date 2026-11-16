@@ -158,53 +158,71 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
   group.name = 'native_bambu_support_group';
 
   const trunkPos: number[] = [];
-  const trunkNorm: number[] = [];
   const trunkIdx: number[] = [];
 
   const ifPos: number[] = [];
-  const ifNorm: number[] = [];
   const ifIdx: number[] = [];
 
   const brimPos: number[] = [];
-  const brimNorm: number[] = [];
   const brimIdx: number[] = [];
 
+  const pushTri = (idxArr: number[], a: number, b: number, c: number) => {
+    idxArr.push(a, b, c);
+  };
+
+  const pushQuad = (idxArr: number[], a: number, b: number, c: number, d: number) => {
+    idxArr.push(a, b, c, a, c, d);
+  };
+
+  /**
+   * Closed watertight manifold ribbon extrusion with exact outward CCW winding:
+   * Welds overlapping endpoint of closed loops so `.3MF`/`.STL` export contains zero open seams.
+   */
   const extrudeHorizontalPolyline = (
     poly: number[],
     posArr: number[],
-    normArr: number[],
     idxArr: number[],
     w: number,
     h: number
   ) => {
-    const m = poly.length / 3;
+    let m = Math.floor(poly.length / 3);
     if (m < 2) return;
 
-    const segNx = new Float32Array(m - 1);
-    const segNz = new Float32Array(m - 1);
-    for (let s = 0; s < m - 1; s++) {
-      const dx = poly[(s + 1) * 3] - poly[s * 3];
-      const dz = poly[(s + 1) * 3 + 2] - poly[s * 3 + 2];
+    const endDist = Math.hypot(
+      poly[(m - 1) * 3] - poly[0],
+      poly[(m - 1) * 3 + 2] - poly[2]
+    );
+    const isClosed = m >= 4 && endDist < 0.35;
+    // Drop duplicate endpoint so closed ring welds cleanly into vertex 0
+    if (isClosed && endDist < 0.05 && m >= 4) {
+      m = m - 1;
+    }
+    if (m < 2 || (isClosed && m < 3)) return;
+
+    const segCount = isClosed ? m : m - 1;
+    const segNx = new Float32Array(segCount);
+    const segNz = new Float32Array(segCount);
+    for (let s = 0; s < segCount; s++) {
+      const next = (s + 1) % m;
+      const dx = poly[next * 3] - poly[s * 3];
+      const dz = poly[next * 3 + 2] - poly[s * 3 + 2];
       const len = Math.hypot(dx, dz) || 1;
       segNx[s] = -dz / len;
       segNz[s] = dx / len;
     }
-
-    const isClosed =
-      m >= 4 &&
-      Math.hypot(poly[(m - 1) * 3] - poly[0], poly[(m - 1) * 3 + 2] - poly[2]) < 0.35;
 
     const startVert = posArr.length / 3;
 
     for (let k = 0; k < m; k++) {
       let nx = 0;
       let nz = 0;
-      if (k > 0 && k < m - 1) {
+      if (isClosed) {
+        const prevSeg = (k - 1 + segCount) % segCount;
+        nx = segNx[prevSeg] + segNx[k];
+        nz = segNz[prevSeg] + segNz[k];
+      } else if (k > 0 && k < m - 1) {
         nx = segNx[k - 1] + segNx[k];
         nz = segNz[k - 1] + segNz[k];
-      } else if (isClosed) {
-        nx = segNx[m - 2] + segNx[0];
-        nz = segNz[m - 2] + segNz[0];
       } else if (k === 0) {
         nx = segNx[0];
         nz = segNz[0];
@@ -216,68 +234,54 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
       nx /= nLen;
       nz /= nLen;
 
+      // Clamp miter extension around acute corners to avoid self-intersection
+      const miterScale = isClosed || (k > 0 && k < m - 1) ? 1.0 : 1.0;
       const x = poly[k * 3];
       const y = poly[k * 3 + 1];
       const z = poly[k * 3 + 2];
       const yTop = y + h;
       const yBot = Math.max(0, y - h);
 
-      // 0: OuterTop, 1: OuterBot, 2: InnerBot, 3: InnerTop
+      // 0: LeftTop (+N), 1: LeftBot (+N), 2: RightBot (-N), 3: RightTop (-N)
       posArr.push(
-        x + nx * w, yTop, z + nz * w,
-        x + nx * w, yBot, z + nz * w,
-        x - nx * w, yBot, z - nz * w,
-        x - nx * w, yTop, z - nz * w
-      );
-
-      normArr.push(
-        nx * 0.98, 0.18, nz * 0.98,
-        nx * 0.98, -0.18, nz * 0.98,
-        -nx * 0.98, -0.18, -nz * 0.98,
-        -nx * 0.98, 0.18, -nz * 0.98
+        x + nx * w * miterScale, yTop, z + nz * w * miterScale,
+        x + nx * w * miterScale, yBot, z + nz * w * miterScale,
+        x - nx * w * miterScale, yBot, z - nz * w * miterScale,
+        x - nx * w * miterScale, yTop, z - nz * w * miterScale
       );
     }
 
-    for (let s = 0; s < m - 1; s++) {
+    for (let s = 0; s < segCount; s++) {
+      const next = (s + 1) % m;
       const b0 = startVert + s * 4;
-      const b1 = b0 + 4;
-      // Outer vertical wall
-      idxArr.push(b0, b0 + 1, b1 + 1, b0, b1 + 1, b1);
-      // Top cap
-      idxArr.push(b0 + 3, b0, b1, b0 + 3, b1, b1 + 3);
-      // Inner vertical wall
-      idxArr.push(b0 + 2, b0 + 3, b1 + 3, b0 + 2, b1 + 3, b1 + 2);
-      // Bottom cap (khép kín khối 3D manifold khi xuất .3MF / .STL)
-      idxArr.push(b0 + 1, b0 + 2, b1 + 2, b0 + 1, b1 + 2, b1 + 1);
+      const b1 = startVert + next * 4;
+      // Left wall (+N outward)
+      pushQuad(idxArr, b0, b0 + 1, b1 + 1, b1);
+      // Top cap (+Y outward)
+      pushQuad(idxArr, b0 + 3, b1 + 3, b1, b0);
+      // Right wall (-N outward)
+      pushQuad(idxArr, b0 + 2, b0 + 3, b1 + 3, b1 + 2);
+      // Bottom cap (-Y outward)
+      pushQuad(idxArr, b0 + 1, b0 + 2, b1 + 2, b1 + 1);
     }
 
-    if (isClosed && m >= 3) {
-      const bLast = startVert + (m - 1) * 4;
-      const bFirst = startVert;
-      const closeDist = Math.hypot(
-        poly[(m - 1) * 3] - poly[0],
-        poly[(m - 1) * 3 + 2] - poly[2]
-      );
-      if (closeDist > 1e-4) {
-        idxArr.push(bLast, bLast + 1, bFirst + 1, bLast, bFirst + 1, bFirst);
-        idxArr.push(bLast + 3, bLast, bFirst, bLast + 3, bFirst, bFirst + 3);
-        idxArr.push(bLast + 2, bLast + 3, bFirst + 3, bLast + 2, bFirst + 3, bFirst + 2);
-        idxArr.push(bLast + 1, bLast + 2, bFirst + 2, bLast + 1, bFirst + 2, bFirst + 1);
-      }
-    } else {
-      // Khép 2 nắp đầu-cuối cho đoạn hở (Start cap & End cap)
+    if (!isClosed) {
       const s0 = startVert;
       const sN = startVert + (m - 1) * 4;
-      idxArr.push(s0, s0 + 3, s0 + 2, s0, s0 + 2, s0 + 1);
-      idxArr.push(sN, sN + 1, sN + 2, sN, sN + 2, sN + 3);
+      // Start cap (-T outward) & End cap (+T outward)
+      pushQuad(idxArr, s0, s0 + 3, s0 + 2, s0 + 1);
+      pushQuad(idxArr, sN, sN + 1, sN + 2, sN + 3);
     }
   };
 
+  /**
+   * Closed watertight 3D tubular segment (with welded end caps) for vertical skeletal branches.
+   */
   const extrude3DTubeSegment = (
     x1: number, y1: number, z1: number,
     x2: number, y2: number, z2: number,
     r1: number, r2: number,
-    posArr: number[], normArr: number[], idxArr: number[]
+    posArr: number[], idxArr: number[]
   ) => {
     const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
     const len = Math.hypot(dx, dy, dz);
@@ -294,7 +298,7 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
     const vy = tz * ux - tx * uz;
     const vz = tx * uy - ty * ux;
 
-    const sides = 8;
+    const sides = 10;
     const startVert = posArr.length / 3;
     for (let ring = 0; ring < 2; ring++) {
       const cx = ring === 0 ? x1 : x2;
@@ -308,16 +312,26 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
         const ny = ca * uy + sa * vy;
         const nz = ca * uz + sa * vz;
         posArr.push(cx + r * nx, cy + r * ny, cz + r * nz);
-        normArr.push(nx, ny, nz);
       }
     }
+
+    // Center cap vertices for closed manifold tubes
+    const capStartCenter = posArr.length / 3;
+    posArr.push(x1, y1, z1);
+    const capEndCenter = posArr.length / 3;
+    posArr.push(x2, y2, z2);
+
     for (let s = 0; s < sides; s++) {
       const sNext = (s + 1) % sides;
       const v00 = startVert + s;
       const v01 = startVert + sNext;
       const v10 = startVert + sides + s;
       const v11 = startVert + sides + sNext;
-      idxArr.push(v00, v10, v11, v00, v11, v01);
+      // Outer side wall
+      pushQuad(idxArr, v00, v01, v11, v10);
+      // Bottom & Top end caps
+      pushTri(idxArr, capStartCenter, v01, v00);
+      pushTri(idxArr, capEndCenter, v10, v11);
     }
   };
 
@@ -325,38 +339,36 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
     const pts = seg.points;
     if (!pts || pts.length < 6) continue;
 
-    // Kiểm tra xem segment là vòng contour phẳng từ G-code hay spline 3D dọc
     const totalDy = Math.abs(pts[pts.length - 2] - pts[1]);
     const is3DSpline = totalDy > 0.5;
 
     if (is3DSpline) {
       const posArr = seg.isInterface ? ifPos : trunkPos;
-      const normArr = seg.isInterface ? ifNorm : trunkNorm;
       const idxArr = seg.isInterface ? ifIdx : trunkIdx;
       for (let i = 0; i < pts.length - 5; i += 6) {
         const x1 = pts[i], y1 = pts[i + 1], z1 = pts[i + 2];
         const x2 = pts[i + 3], y2 = pts[i + 4], z2 = pts[i + 5];
-        const r1 = seg.isInterface ? 1.8 : Math.max(1.1, 3.0 - Math.min(1.8, y1 * 0.025));
-        const r2 = seg.isInterface ? 1.8 : Math.max(1.1, 3.0 - Math.min(1.8, y2 * 0.025));
-        extrude3DTubeSegment(x1, y1, z1, x2, y2, z2, r1, r2, posArr, normArr, idxArr);
+        const r1 = seg.isInterface ? 1.4 : Math.max(0.85, 2.6 - Math.min(1.5, y1 * 0.02));
+        const r2 = seg.isInterface ? 1.4 : Math.max(0.85, 2.6 - Math.min(1.5, y2 * 0.02));
+        extrude3DTubeSegment(x1, y1, z1, x2, y2, z2, r1, r2, posArr, idxArr);
       }
       continue;
     }
 
-    const halfW = data.lineWidthMm ? Math.max(0.16, data.lineWidthMm * 0.46) : 0.22;
-    const halfH = data.layerHeightMm ? Math.max(0.06, data.layerHeightMm * 0.66) : 0.14;
+    const halfW = data.lineWidthMm ? Math.max(0.18, data.lineWidthMm * 0.48) : 0.22;
+    // Slight vertical overlap eliminates visible layer seams and merges manifold shells cleanly
+    const halfH = data.layerHeightMm ? Math.max(0.08, data.layerHeightMm * 0.56) : 0.13;
 
-    // Gom các cặp đoạn thẳng liên tiếp [x1,y1,z1, x2,y2,z2] thành polyline liên tục
     let curPoly: number[] = [];
     const flushPoly = () => {
       if (curPoly.length >= 6) {
         const yLayer = curPoly[1];
         if (!seg.isInterface && yLayer <= 0.32) {
-          extrudeHorizontalPolyline(curPoly, brimPos, brimNorm, brimIdx, halfW * 1.05, Math.min(0.11, halfH));
+          extrudeHorizontalPolyline(curPoly, brimPos, brimIdx, halfW * 1.05, Math.min(0.12, halfH));
         } else if (seg.isInterface) {
-          extrudeHorizontalPolyline(curPoly, ifPos, ifNorm, ifIdx, halfW * 0.96, halfH * 0.92);
+          extrudeHorizontalPolyline(curPoly, ifPos, ifIdx, halfW * 0.96, halfH * 0.94);
         } else {
-          extrudeHorizontalPolyline(curPoly, trunkPos, trunkNorm, trunkIdx, halfW, halfH);
+          extrudeHorizontalPolyline(curPoly, trunkPos, trunkIdx, halfW, halfH);
         }
       }
       curPoly = [];
@@ -386,14 +398,14 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
   if (trunkPos.length > 0) {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.Float32BufferAttribute(trunkPos, 3));
-    geom.setAttribute('normal', new THREE.Float32BufferAttribute(trunkNorm, 3));
     geom.setIndex(trunkIdx);
+    geom.computeVertexNormals();
 
     const trunkMat = new THREE.MeshStandardMaterial({
       color: 0x00e050,
       roughness: 0.32,
       metalness: 0.06,
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide,
     });
     const trunkMesh = new THREE.Mesh(geom, trunkMat);
     trunkMesh.castShadow = true;
@@ -406,15 +418,15 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
   if (ifPos.length > 0) {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.Float32BufferAttribute(ifPos, 3));
-    geom.setAttribute('normal', new THREE.Float32BufferAttribute(ifNorm, 3));
     geom.setIndex(ifIdx);
+    geom.computeVertexNormals();
 
     const ifMat = new THREE.MeshStandardMaterial({
       color: 0xd946ef,
       emissive: new THREE.Color(0xa21caf),
       emissiveIntensity: 0.28,
       roughness: 0.25,
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide,
     });
     const ifMesh = new THREE.Mesh(geom, ifMat);
     ifMesh.castShadow = true;
@@ -426,14 +438,14 @@ export function buildNativeSupportMesh(data: INativeSupportData): THREE.Group {
   if (brimPos.length > 0) {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.Float32BufferAttribute(brimPos, 3));
-    geom.setAttribute('normal', new THREE.Float32BufferAttribute(brimNorm, 3));
     geom.setIndex(brimIdx);
+    geom.computeVertexNormals();
 
     const brimMat = new THREE.MeshStandardMaterial({
       color: 0xc026d3,
       roughness: 0.35,
       metalness: 0.05,
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide,
     });
     const brimMesh = new THREE.Mesh(geom, brimMat);
     brimMesh.receiveShadow = true;

@@ -7,6 +7,9 @@ import {
   ICustomDefectKnowledgeRule,
   fetchLearnedDefectRulesFromDB,
   setLearnedDefectRules,
+  getPersonalSandboxRuleIds,
+  setRulePersonalSandbox,
+  getKnowledgeStorageInfo,
 } from '@/services/preflightAnalyzer';
 import {
   IconCheckShield,
@@ -43,6 +46,19 @@ const DEFECT_TYPES: { id: DefectCategoryType; label: string }[] = [
   { id: 'custom_defect', label: 'Custom Defect / Lỗi thực tế khác từ xưởng in' },
 ];
 
+const TRIGGER_PARAM_OPTIONS: { key: string; label: string; defaultOp: '>' | '<' }[] = [
+  { key: '', label: 'Tự nhận diện theo nhóm lỗi & mô tả', defaultOp: '>' },
+  { key: 'printSpeed', label: 'Tốc độ in (printSpeed mm/s)', defaultOp: '>' },
+  { key: 'nozzleTemp', label: 'Nhiệt đầu phun (nozzleTemp °C)', defaultOp: '>' },
+  { key: 'bedTemp', label: 'Nhiệt bàn in (bedTemp °C)', defaultOp: '<' },
+  { key: 'layerHeight', label: 'Chiều cao lớp (layerHeight mm)', defaultOp: '>' },
+  { key: 'retractionDistanceMm', label: 'Rút nhựa (retractionDistanceMm mm)', defaultOp: '<' },
+  { key: 'coolingFanSpeed', label: 'Quạt làm mát (coolingFanSpeed %)', defaultOp: '<' },
+  { key: 'supportTopZDistance', label: 'Khe Z Support (supportTopZDistance mm)', defaultOp: '<' },
+  { key: 'wallLoops', label: 'Số vòng tường (wallLoops)', defaultOp: '<' },
+  { key: 'infillDensity', label: 'Mật độ Infill (infillDensity %)', defaultOp: '<' },
+];
+
 export function DefectKnowledgeModal({
   isOpen,
   onClose,
@@ -52,14 +68,19 @@ export function DefectKnowledgeModal({
 }: DefectKnowledgeModalProps) {
   const [activeTab, setActiveTab] = useState<'submit' | 'database' | 'login'>('submit');
   const [rules, setRules] = useState<ICustomDefectKnowledgeRule[]>([]);
+  const [sandboxIds, setSandboxIds] = useState<string[]>([]);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusKind, setStatusKind] = useState<'info' | 'error'>('info');
+  const [storageInfo, setStorageInfo] = useState(getKnowledgeStorageInfo());
 
   // User / Admin Session State
   const [currentUser, setCurrentUser] = useState<{
     id: string;
     username?: string;
-    displayName: string;
+    name?: string;
+    displayName?: string;
     role: string;
   } | null>(null);
   const [loginId, setLoginId] = useState('');
@@ -71,35 +92,50 @@ export function DefectKnowledgeModal({
   const [defectType, setDefectType] = useState<DefectCategoryType>('overhang');
   const [severity, setSeverity] = useState<'low' | 'medium' | 'high' | 'critical'>('high');
   const [triggerCondition, setTriggerCondition] = useState('');
+  const [triggerParamKey, setTriggerParamKey] = useState('');
+  const [triggerOperator, setTriggerOperator] = useState<'>' | '<' | '>=' | '<=' | '==' | '!='>('>');
+  const [triggerThreshold, setTriggerThreshold] = useState('');
   const [explanation, setExplanation] = useState('');
   const [tagsInput, setTagsInput] = useState('');
   const [includeCurrentProfileFix, setIncludeCurrentProfileFix] = useState(true);
 
-  // Admin Edit State
+  // Admin Edit & Reject State
   const [editingRule, setEditingRule] = useState<ICustomDefectKnowledgeRule | null>(null);
+  const [rejectingRuleId, setRejectingRuleId] = useState<string | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+
+  const showMessage = (msg: string, kind: 'info' | 'error' = 'info') => {
+    setStatusMsg(msg);
+    setStatusKind(kind);
+  };
+
+  const syncRulesToParent = (fetched: ICustomDefectKnowledgeRule[]) => {
+    setRules(fetched);
+    setLearnedDefectRules(fetched);
+    onRulesUpdated(fetched);
+    setSandboxIds(getPersonalSandboxRuleIds());
+    setStorageInfo(getKnowledgeStorageInfo());
+  };
 
   const loadSessionAndRules = async () => {
     setLoading(true);
     try {
       const savedUid = localStorage.getItem('laymor_session_uid') || '';
       const authRes = await fetch('/api/auth/me', {
+        credentials: 'include',
+        cache: 'no-store',
         headers: savedUid ? { 'x-laymor-uid': savedUid } : {},
       });
       if (authRes.ok) {
         const authData = await authRes.json();
-        if (authData.user) {
-          setCurrentUser(authData.user);
-        } else {
-          setCurrentUser(null);
-        }
+        setCurrentUser(authData.user || null);
       }
     } catch {
       // ignore
     }
 
     const fetched = await fetchLearnedDefectRulesFromDB();
-    setRules(fetched);
-    onRulesUpdated(fetched);
+    syncRulesToParent(fetched);
     setLoading(false);
   };
 
@@ -116,7 +152,12 @@ export function DefectKnowledgeModal({
 
   if (!isOpen) return null;
 
-  const isAdmin = currentUser?.role === 'admin' || currentUser?.username === 'hlcai_admin';
+  const isAdmin =
+    currentUser?.role === 'admin' ||
+    currentUser?.role === 'mod' ||
+    currentUser?.username === 'hlcai_admin';
+  const currentUserDisplay =
+    currentUser?.name || currentUser?.displayName || currentUser?.username || '';
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,6 +165,7 @@ export function DefectKnowledgeModal({
     try {
       const res = await fetch('/api/auth/me', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'login',
@@ -138,10 +180,14 @@ export function DefectKnowledgeModal({
       }
       localStorage.setItem('laymor_session_uid', data.user.id);
       localStorage.setItem('laymor_session_user', JSON.stringify(data.user));
+      window.dispatchEvent(new CustomEvent('laymor-auth-change'));
       setCurrentUser(data.user);
       setLoginPass('');
-      setStatusMsg(`✓ Đã đăng nhập: ${data.user.displayName} (${data.user.role.toUpperCase()})`);
-      setActiveTab('database');
+      showMessage(
+        `✓ Đã đăng nhập: ${data.user.name || data.user.username} (${data.user.role.toUpperCase()})`
+      );
+      await loadSessionAndRules();
+      setActiveTab('submit');
     } catch (err: any) {
       setLoginError(err.message || 'Lỗi kết nối máy chủ');
     }
@@ -150,17 +196,25 @@ export function DefectKnowledgeModal({
   const handleLogout = async () => {
     await fetch('/api/auth/me', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'logout' }),
     }).catch(() => {});
     localStorage.removeItem('laymor_session_uid');
     localStorage.removeItem('laymor_session_user');
+    window.dispatchEvent(new CustomEvent('laymor-auth-change'));
     setCurrentUser(null);
-    setStatusMsg('Đã đăng xuất tài khoản.');
+    showMessage('Đã đăng xuất tài khoản.');
+    await loadSessionAndRules();
   };
 
   const handleSubmitDefect = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!currentUser) {
+      showMessage('Vui lòng đăng nhập tài khoản Laymor3D để gửi bài học cho AI.', 'error');
+      setActiveTab('login');
+      return;
+    }
     if (!title.trim() || !explanation.trim()) return;
 
     setLoading(true);
@@ -180,18 +234,35 @@ export function DefectKnowledgeModal({
         }
       : undefined;
 
+    const triggerPayload =
+      triggerParamKey && triggerThreshold.trim() !== ''
+        ? {
+            paramKey: triggerParamKey,
+            operator: triggerOperator,
+            thresholdValue: Number.isNaN(Number(triggerThreshold))
+              ? triggerThreshold.trim()
+              : Number(triggerThreshold),
+            description:
+              triggerCondition.trim() ||
+              `${triggerParamKey} ${triggerOperator} ${triggerThreshold.trim()} (${currentProfile.material})`,
+          }
+        : {
+            description:
+              triggerCondition.trim() ||
+              `${currentProfile.material} @ ${currentProfile.nozzleTemp}°C`,
+          };
+
     try {
       const res = await fetch('/api/knowledge', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: title.trim(),
           category: 'simulator_defect_learning',
           defectType,
           severity,
-          triggerCondition:
-            triggerCondition.trim() ||
-            `${currentProfile.material} @ ${currentProfile.nozzleTemp}°C`,
+          triggerCondition: triggerPayload,
           content: explanation.trim(),
           tags: [
             currentProfile.material,
@@ -202,27 +273,30 @@ export function DefectKnowledgeModal({
               .filter(Boolean),
           ],
           autoFixPatch,
-          submittedBy: currentUser?.username || currentUser?.displayName || 'Người dùng 3DSim',
-          isAdmin,
         }),
       });
       const data = await res.json();
       if (res.ok && data.entry) {
+        if (!data.entry.isVerified && data.entry.id) {
+          setRulePersonalSandbox(data.entry.id, true);
+        }
         const updated = await fetchLearnedDefectRulesFromDB();
-        setRules(updated);
-        setLearnedDefectRules(updated);
-        onRulesUpdated(updated);
+        syncRulesToParent(updated);
         setTitle('');
         setExplanation('');
-        setStatusMsg(
-          '✓ Đã gửi dữ liệu lỗi & giải thích chi tiết về Database! App giả lập đã học thêm quy tắc mới.'
+        setTriggerThreshold('');
+        showMessage(
+          data.message ||
+            (data.entry.isVerified
+              ? '✓ Admin đã lưu & phát hành quy tắc lên Database!'
+              : '✓ Đã gửi vào hàng chờ duyệt và BẬT Sandbox Cá Nhân để bạn test thử ngay!')
         );
         setActiveTab('database');
       } else {
-        setStatusMsg(data.error || 'Không thể lưu dữ liệu lỗi.');
+        showMessage(data.error || 'Không thể lưu dữ liệu lỗi.', 'error');
       }
     } catch (err: any) {
-      setStatusMsg('Lỗi kết nối: ' + err.message);
+      showMessage('Lỗi kết nối: ' + err.message, 'error');
     } finally {
       setLoading(false);
     }
@@ -235,62 +309,114 @@ export function DefectKnowledgeModal({
     try {
       const res = await fetch('/api/knowledge', {
         method: 'PUT',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: editingRule.id,
           title: editingRule.title,
           defectType: editingRule.defectType,
           severity: editingRule.severity,
-          triggerCondition: editingRule.triggerCondition,
+          triggerCondition: editingRule.triggerSpec || {
+            description: editingRule.triggerCondition,
+          },
           content: editingRule.content,
           tags: editingRule.tags,
           isVerified: editingRule.isVerified,
         }),
       });
+      const data = await res.json();
       if (res.ok) {
         const updated = await fetchLearnedDefectRulesFromDB();
-        setRules(updated);
-        setLearnedDefectRules(updated);
-        onRulesUpdated(updated);
+        syncRulesToParent(updated);
         setEditingRule(null);
-        setStatusMsg('✓ Admin đã cập nhật kiến thức lỗi giả lập thành công!');
+        showMessage('✓ Admin đã cập nhật kiến thức lỗi giả lập xuống Database!');
+      } else {
+        showMessage(data.error || 'Không thể cập nhật rule.', 'error');
       }
     } finally {
       setLoading(false);
     }
   };
 
-  const handleToggleVerify = async (rule: ICustomDefectKnowledgeRule) => {
+  const handleModerateAction = async (
+    rule: ICustomDefectKnowledgeRule,
+    action: 'approve' | 'reject' | 'unverify',
+    reason?: string
+  ) => {
     if (!isAdmin) return;
-    const res = await fetch('/api/knowledge', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: rule.id,
-        isVerified: !rule.isVerified,
-      }),
-    });
-    if (res.ok) {
-      const updated = await fetchLearnedDefectRulesFromDB();
-      setRules(updated);
-      setLearnedDefectRules(updated);
-      onRulesUpdated(updated);
+    setLoading(true);
+    try {
+      const res = await fetch('/api/knowledge', {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: rule.id,
+          action,
+          rejectionReason: reason,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const updated = await fetchLearnedDefectRulesFromDB();
+        syncRulesToParent(updated);
+        setRejectingRuleId(null);
+        setRejectReasonInput('');
+        showMessage(data.message || '✓ Đã cập nhật trạng thái kiểm duyệt!');
+      } else {
+        showMessage(data.error || 'Lỗi kiểm duyệt quy tắc.', 'error');
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleDeleteRule = async (id: string) => {
-    if (!isAdmin) return;
-    const res = await fetch(`/api/knowledge?id=${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-    if (res.ok) {
-      const updated = await fetchLearnedDefectRulesFromDB();
-      setRules(updated);
-      setLearnedDefectRules(updated);
-      onRulesUpdated(updated);
-      setStatusMsg('✓ Đã xóa quy tắc lỗi khỏi Knowledge Database.');
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/knowledge?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setRulePersonalSandbox(id, false);
+        const updated = await fetchLearnedDefectRulesFromDB();
+        syncRulesToParent(updated);
+        showMessage('✓ Đã xóa quy tắc lỗi khỏi Knowledge Database.');
+      } else {
+        showMessage(data.error || 'Không thể xóa quy tắc.', 'error');
+      }
+    } finally {
+      setLoading(false);
     }
   };
+
+  const handleToggleSandbox = (ruleId: string) => {
+    const enabled = !sandboxIds.includes(ruleId);
+    const next = setRulePersonalSandbox(ruleId, enabled);
+    setSandboxIds(next);
+    onRulesUpdated([...rules]);
+    showMessage(
+      enabled
+        ? '🧪 Đã BẬT Sandbox Cá Nhân cho quy tắc này (chỉ áp dụng kiểm lỗi trên máy bạn).'
+        : 'Đã tắt Sandbox Cá Nhân cho quy tắc này.'
+    );
+  };
+
+  const pendingCount = rules.filter(
+    (r) => (r.moderationStatus || (r.isVerified ? 'approved' : 'pending')) === 'pending'
+  ).length;
+  const approvedCount = rules.filter(
+    (r) => (r.moderationStatus || (r.isVerified ? 'approved' : 'pending')) === 'approved'
+  ).length;
+  const rejectedCount = rules.filter((r) => r.moderationStatus === 'rejected').length;
+
+  const filteredRules = rules.filter((r) => {
+    if (statusFilter === 'all') return true;
+    const st = r.moderationStatus || (r.isVerified ? 'approved' : 'pending');
+    return st === statusFilter;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in">
@@ -305,9 +431,18 @@ export function DefectKnowledgeModal({
               <h2 className="text-sm sm:text-base font-bold studio-text-primary uppercase tracking-wider">
                 Cơ Sở Tri Thức Lỗi In 3D &amp; Huấn Luyện AI Giả Lập
               </h2>
-              <p className="text-xs studio-text-secondary">
-                Đóng góp lỗi thực tế kèm giải thích chi tiết để tối ưu bộ giả lập • Admin toàn quyền chỉnh sửa tri thức
-              </p>
+              <div className="flex flex-wrap items-center gap-2 text-xs studio-text-secondary">
+                <span>Mọi tài khoản đóng góp → Chờ Admin duyệt • Sandbox cá nhân test ngay</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                    storageInfo.persisted
+                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                      : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                  }`}
+                >
+                  DB: {storageInfo.storageLabel}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -328,15 +463,20 @@ export function DefectKnowledgeModal({
                 activeTab === 'submit' ? 'studio-pill-active' : 'studio-pill-inactive'
               }`}
             >
-              + Nhập Lỗi &amp; Giải Thích Mới
+              + Dạy AI Lỗi Mới
             </button>
             <button
               onClick={() => setActiveTab('database')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
                 activeTab === 'database' ? 'studio-pill-active' : 'studio-pill-inactive'
               }`}
             >
-              Kho Kiến Thức Đã Học ({rules.length})
+              <span>Kho Kiến Thức ({rules.length})</span>
+              {pendingCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-amber-500/25 text-amber-300 text-[10px] font-bold">
+                  {pendingCount} chờ
+                </span>
+              )}
             </button>
             <button
               onClick={() => setActiveTab('login')}
@@ -345,22 +485,28 @@ export function DefectKnowledgeModal({
               }`}
             >
               {currentUser
-                ? `Tài khoản: ${currentUser.username || currentUser.displayName} (${currentUser.role.toUpperCase()})`
-                : 'Đăng nhập Admin / User'}
+                ? `${currentUserDisplay} (${currentUser.role.toUpperCase()})`
+                : 'Đăng nhập SSO'}
             </button>
           </div>
 
           {isAdmin && (
             <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-emerald-400 text-[10px] font-mono font-bold uppercase">
-              ★ Quyền Master Admin (Toàn quyền sửa/xóa tri thức)
+              ★ Master Admin (Kiểm duyệt &amp; Phát hành AI)
             </span>
           )}
         </div>
 
         {statusMsg && (
-          <div className="p-3 rounded-xl studio-gold-badge text-xs font-semibold flex items-center justify-between">
+          <div
+            className={`p-3 rounded-xl text-xs font-semibold flex items-center justify-between border ${
+              statusKind === 'error'
+                ? 'bg-rose-500/15 border-rose-500/35 text-rose-300'
+                : 'studio-gold-badge'
+            }`}
+          >
             <span>{statusMsg}</span>
-            <button onClick={() => setStatusMsg(null)} className="text-[10px] underline ml-2">
+            <button onClick={() => setStatusMsg(null)} className="text-[10px] underline ml-2 cursor-pointer">
               Đóng
             </button>
           </div>
@@ -368,141 +514,245 @@ export function DefectKnowledgeModal({
 
         {/* TAB 1: NHẬP LỖI & GIẢI THÍCH TỪ NGƯỜI DÙNG */}
         {activeTab === 'submit' && (
-          <form onSubmit={handleSubmitDefect} className="space-y-3.5 text-xs">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <label className="font-semibold studio-text-primary block">
-                  Tên hiện tượng lỗi phát sinh *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="VD: Nhựa PETG bị kéo tơ & vón cục đen ở lớp vỏ nghiêng..."
-                  className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="font-semibold studio-text-primary block">
-                  Nhóm lỗi kỹ thuật (Defect Category)
-                </label>
-                <select
-                  value={defectType}
-                  onChange={(e) => setDefectType(e.target.value as DefectCategoryType)}
-                  className="w-full px-3 py-2 rounded-xl glass-input text-xs cursor-pointer"
-                >
-                  {DEFECT_TYPES.map((dt) => (
-                    <option key={dt.id} value={dt.id} className="bg-neutral-900 text-neutral-100">
-                      {dt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="space-y-1">
-                <label className="font-semibold studio-text-primary block">Mức độ rủi ro</label>
-                <select
-                  value={severity}
-                  onChange={(e) => setSeverity(e.target.value as any)}
-                  className="w-full px-3 py-2 rounded-xl glass-input text-xs cursor-pointer"
-                >
-                  <option value="critical" className="bg-neutral-900">Nghiêm trọng (Critical - Hỏng mẫu)</option>
-                  <option value="high" className="bg-neutral-900">Cao (High - Sai lệch kết cấu)</option>
-                  <option value="medium" className="bg-neutral-900">Trung bình (Medium - Lỗi thẩm mỹ)</option>
-                  <option value="low" className="bg-neutral-900">Thấp (Low - Lưu ý nhỏ)</option>
-                </select>
-              </div>
-
-              <div className="sm:col-span-2 space-y-1">
-                <label className="font-semibold studio-text-primary flex items-center justify-between">
-                  <span>Điều kiện thông số phát sinh lỗi (Trigger Condition)</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setTriggerCondition(
-                        `${currentProfile.material} • Nozzle ${currentProfile.nozzleTemp}°C • Bed ${currentProfile.bedTemp}°C • Speed ${currentProfile.printSpeed}mm/s • Layer ${currentProfile.layerHeight}mm`
-                      )
-                    }
-                    className="text-[10px] studio-text-gold hover:underline cursor-pointer"
-                  >
-                    Lấy từ Profile hiện tại
-                  </button>
-                </label>
-                <input
-                  type="text"
-                  value={triggerCondition}
-                  onChange={(e) => setTriggerCondition(e.target.value)}
-                  placeholder="VD: Khi in PETG nhiệt độ > 255°C và Retraction < 0.6mm..."
-                  className="w-full px-3 py-2 rounded-xl glass-input text-xs font-mono"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <label className="font-semibold studio-text-primary block">
-                Giải thích chi tiết nguyên nhân &amp; cách khắc phục thực tế *
-              </label>
-              <textarea
-                rows={4}
-                required
-                value={explanation}
-                onChange={(e) => setExplanation(e.target.value)}
-                placeholder="Mô tả rõ hiện tượng gặp phải trên máy in, nguyên nhân vật lý/nhiệt học và thông số Bambu Studio cần chỉnh để khắc phục triệt để..."
-                className="w-full px-3 py-2 rounded-xl glass-input text-xs leading-relaxed"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
-              <div className="space-y-1">
-                <label className="font-semibold studio-text-primary block">
-                  Từ khóa nhận diện (cách nhau dấu phẩy)
-                </label>
-                <input
-                  type="text"
-                  value={tagsInput}
-                  onChange={(e) => setTagsInput(e.target.value)}
-                  placeholder="VD: PETG, stringing, nozzle_temp, bambu_x1c"
-                  className="w-full px-3 py-2 rounded-xl glass-input text-xs"
-                />
-              </div>
-
-              <label className="p-3 rounded-xl studio-card flex items-center justify-between cursor-pointer mt-2 sm:mt-4">
-                <div>
-                  <div className="font-semibold studio-text-primary text-[11px]">
-                    Đính kèm Profile hiện tại làm Bản Vá Tự Động
+          <div className="space-y-3.5 text-xs">
+            {!currentUser && (
+              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-wrap items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="font-bold text-amber-300">
+                    Yêu cầu đăng nhập để gửi bài học lỗi cho AI
                   </div>
-                  <div className="text-[10px] studio-text-secondary">
-                    Lưu thông số đang mở ({currentProfile.material} {currentProfile.layerHeight}mm, {currentProfile.nozzleTemp}°C)
+                  <div className="text-[11px] studio-text-secondary">
+                    Mọi tài khoản đã đăng nhập đều có thể gửi bài học (vào hàng chờ Admin duyệt &amp; test ngay ở Sandbox Cá Nhân).
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={includeCurrentProfileFix}
-                  onChange={(e) => setIncludeCurrentProfileFix(e.target.checked)}
-                  className="w-4 h-4 accent-[var(--accent-gold)] rounded cursor-pointer"
-                />
-              </label>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('login')}
+                  className="px-4 py-2 rounded-xl studio-cta-primary font-bold text-xs cursor-pointer"
+                >
+                  Đăng Nhập Ngay →
+                </button>
+              </div>
+            )}
 
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="submit"
-                disabled={loading}
-                className="px-5 py-2.5 rounded-xl studio-cta-primary font-bold text-xs cursor-pointer transition-all active:scale-95 disabled:opacity-50"
-              >
-                {loading ? 'Đang đồng bộ Database...' : 'Gửi Vào Bộ Nhớ Học Tập Của App →'}
-              </button>
-            </div>
-          </form>
+            <form onSubmit={handleSubmitDefect} className="space-y-3.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="font-semibold studio-text-primary block">
+                    Tên hiện tượng lỗi phát sinh *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={4}
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="VD: Nhựa PETG bị kéo tơ & vón cục đen ở lớp vỏ nghiêng..."
+                    className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold studio-text-primary block">
+                    Nhóm lỗi kỹ thuật (Defect Category)
+                  </label>
+                  <select
+                    value={defectType}
+                    onChange={(e) => setDefectType(e.target.value as DefectCategoryType)}
+                    className="w-full px-3 py-2 rounded-xl glass-input text-xs cursor-pointer"
+                  >
+                    {DEFECT_TYPES.map((dt) => (
+                      <option key={dt.id} value={dt.id} className="bg-neutral-900 text-neutral-100">
+                        {dt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <label className="font-semibold studio-text-primary block">Mức độ rủi ro</label>
+                  <select
+                    value={severity}
+                    onChange={(e) => setSeverity(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl glass-input text-xs cursor-pointer"
+                  >
+                    <option value="critical" className="bg-neutral-900">Nghiêm trọng (Critical)</option>
+                    <option value="high" className="bg-neutral-900">Cao (High)</option>
+                    <option value="medium" className="bg-neutral-900">Trung bình (Medium)</option>
+                    <option value="low" className="bg-neutral-900">Thấp (Low)</option>
+                  </select>
+                </div>
+
+                <div className="sm:col-span-2 space-y-1">
+                  <label className="font-semibold studio-text-primary flex items-center justify-between">
+                    <span>Mô tả điều kiện thông số (Trigger Condition)</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTriggerCondition(
+                          `${currentProfile.material} • Nozzle ${currentProfile.nozzleTemp}°C • Bed ${currentProfile.bedTemp}°C • Speed ${currentProfile.printSpeed}mm/s • Layer ${currentProfile.layerHeight}mm`
+                        )
+                      }
+                      className="text-[10px] studio-text-gold hover:underline cursor-pointer"
+                    >
+                      Lấy từ Profile hiện tại
+                    </button>
+                  </label>
+                  <input
+                    type="text"
+                    value={triggerCondition}
+                    onChange={(e) => setTriggerCondition(e.target.value)}
+                    placeholder="VD: Khi in PETG nhiệt độ > 255°C và Retraction < 0.6mm..."
+                    className="w-full px-3 py-2 rounded-xl glass-input text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Structured Trigger Builder */}
+              <div className="p-3 rounded-xl studio-card border studio-border space-y-2">
+                <div className="font-semibold studio-text-gold text-[11px]">
+                  Quy tắc kích hoạt tự động trong Preflight (Tùy chọn)
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                  <select
+                    value={triggerParamKey}
+                    onChange={(e) => {
+                      const nextKey = e.target.value;
+                      setTriggerParamKey(nextKey);
+                      const found = TRIGGER_PARAM_OPTIONS.find((p) => p.key === nextKey);
+                      if (found) setTriggerOperator(found.defaultOp);
+                    }}
+                    className="sm:col-span-2 px-2.5 py-1.5 rounded-lg glass-input text-xs cursor-pointer"
+                  >
+                    {TRIGGER_PARAM_OPTIONS.map((opt) => (
+                      <option key={opt.key} value={opt.key} className="bg-neutral-900">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={triggerOperator}
+                    disabled={!triggerParamKey}
+                    onChange={(e) => setTriggerOperator(e.target.value as any)}
+                    className="px-2.5 py-1.5 rounded-lg glass-input text-xs font-mono disabled:opacity-40"
+                  >
+                    <option value=">" className="bg-neutral-900">&gt; (lớn hơn)</option>
+                    <option value="<" className="bg-neutral-900">&lt; (nhỏ hơn)</option>
+                    <option value=">=" className="bg-neutral-900">&gt;=</option>
+                    <option value="<=" className="bg-neutral-900">&lt;=</option>
+                    <option value="==" className="bg-neutral-900">== (bằng)</option>
+                  </select>
+                  <input
+                    type="text"
+                    disabled={!triggerParamKey}
+                    value={triggerThreshold}
+                    onChange={(e) => setTriggerThreshold(e.target.value)}
+                    placeholder="Ngưỡng (VD: 240)"
+                    className="px-2.5 py-1.5 rounded-lg glass-input text-xs font-mono disabled:opacity-40"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="font-semibold studio-text-primary block">
+                  Giải thích chi tiết nguyên nhân &amp; cách khắc phục thực tế *
+                </label>
+                <textarea
+                  rows={4}
+                  required
+                  minLength={8}
+                  value={explanation}
+                  onChange={(e) => setExplanation(e.target.value)}
+                  placeholder="Mô tả rõ hiện tượng gặp phải trên máy in, nguyên nhân vật lý/nhiệt học và thông số cần chỉnh để khắc phục triệt để..."
+                  className="w-full px-3 py-2 rounded-xl glass-input text-xs leading-relaxed"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                <div className="space-y-1">
+                  <label className="font-semibold studio-text-primary block">
+                    Từ khóa nhận diện (cách nhau dấu phẩy)
+                  </label>
+                  <input
+                    type="text"
+                    value={tagsInput}
+                    onChange={(e) => setTagsInput(e.target.value)}
+                    placeholder="VD: PETG, stringing, nozzle_temp, bambu_x1c"
+                    className="w-full px-3 py-2 rounded-xl glass-input text-xs"
+                  />
+                </div>
+
+                <label className="p-3 rounded-xl studio-card flex items-center justify-between cursor-pointer mt-2 sm:mt-4">
+                  <div>
+                    <div className="font-semibold studio-text-primary text-[11px]">
+                      Đính kèm Profile hiện tại làm Bản Vá Tự Động
+                    </div>
+                    <div className="text-[10px] studio-text-secondary">
+                      Lưu thông số ({currentProfile.material} {currentProfile.layerHeight}mm, {currentProfile.nozzleTemp}°C) — Server tự giới hạn an toàn
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={includeCurrentProfileFix}
+                    onChange={(e) => setIncludeCurrentProfileFix(e.target.checked)}
+                    className="w-4 h-4 accent-[var(--accent-gold)] rounded cursor-pointer"
+                  />
+                </label>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 pt-2">
+                <span className="text-[10px] studio-text-muted">
+                  {isAdmin
+                    ? 'Tài khoản Admin: Bài học sẽ được duyệt & lưu thẳng lên Neon PostgreSQL.'
+                    : 'Tài khoản Thành viên: Bài học vào hàng chờ duyệt + bật Sandbox test riêng trên máy bạn.'}
+                </span>
+                <button
+                  type="submit"
+                  disabled={loading || !currentUser}
+                  className="px-5 py-2.5 rounded-xl studio-cta-primary font-bold text-xs cursor-pointer transition-all active:scale-95 disabled:opacity-50"
+                >
+                  {loading ? 'Đang lưu xuống Database...' : 'Gửi Dữ Liệu Huấn Luyện AI →'}
+                </button>
+              </div>
+            </form>
+          </div>
         )}
 
         {/* TAB 2: DANH SÁCH TRI THỨC LỖI & QUẢN TRỊ ADMIN */}
         {activeTab === 'database' && (
           <div className="space-y-3 text-xs">
+            {/* Status Filter Pills */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  { id: 'all', label: `Tất cả (${rules.length})` },
+                  { id: 'approved', label: `Đang áp dụng (${approvedCount})` },
+                  { id: 'pending', label: `Chờ duyệt (${pendingCount})` },
+                  { id: 'rejected', label: `Từ chối (${rejectedCount})` },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setStatusFilter(f.id as any)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer ${
+                      statusFilter === f.id ? 'studio-pill-active' : 'studio-pill-inactive'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={loadSessionAndRules}
+                className="px-2.5 py-1 rounded-lg studio-card text-[10px] studio-text-secondary hover:studio-text-primary cursor-pointer"
+              >
+                ↻ Làm mới DB
+              </button>
+            </div>
+
             {editingRule && isAdmin && (
               <form
                 onSubmit={handleSaveAdminEdit}
@@ -515,7 +765,7 @@ export function DefectKnowledgeModal({
                   <button
                     type="button"
                     onClick={() => setEditingRule(null)}
-                    className="text-[11px] studio-text-secondary hover:studio-text-primary"
+                    className="text-[11px] studio-text-secondary hover:studio-text-primary cursor-pointer"
                   >
                     Hủy
                   </button>
@@ -557,7 +807,7 @@ export function DefectKnowledgeModal({
                       className="w-4 h-4 accent-[var(--accent-gold)]"
                     />
                     <span className="text-[11px] studio-text-primary font-semibold">
-                      Kích hoạt áp dụng vào bộ kiểm lỗi 3D PrintSim
+                      Duyệt áp dụng toàn hệ thống 3D PrintSim
                     </span>
                   </label>
                   <button
@@ -571,81 +821,181 @@ export function DefectKnowledgeModal({
             )}
 
             <div className="space-y-2 max-h-[52vh] overflow-y-auto pr-1">
-              {rules.map((r) => (
-                <div
-                  key={r.id}
-                  className="p-3.5 rounded-xl studio-card space-y-2 border studio-border"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span
-                        className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${
-                          r.isVerified
-                            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                            : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                        }`}
-                      >
-                        {r.isVerified ? 'Đang Áp Dụng' : 'Chờ Duyệt'}
-                      </span>
-                      <span className="px-2 py-0.5 rounded studio-gold-badge text-[9px] font-mono uppercase">
-                        {r.defectType || r.category}
-                      </span>
-                      <h4 className="font-bold studio-text-primary text-xs">{r.title}</h4>
-                    </div>
+              {filteredRules.map((r) => {
+                const modStatus = r.moderationStatus || (r.isVerified ? 'approved' : 'pending');
+                const isInSandbox = sandboxIds.includes(r.id);
+                const isAuthor =
+                  Boolean(currentUser) &&
+                  ((r.submittedByUserId && r.submittedByUserId === currentUser?.id) ||
+                    (!r.submittedByUserId &&
+                      (r.submittedBy === currentUser?.username || r.submittedBy === currentUser?.name)));
 
-                    <div className="flex items-center gap-1.5">
-                      {r.autoFixPatch && onApplyFix && (
-                        <button
-                          onClick={() => {
-                            onApplyFix(r.autoFixPatch!);
-                            setStatusMsg(`✓ Đã nạp thông số khắc phục từ mục "${r.title}"!`);
-                          }}
-                          className="px-2.5 py-1 rounded-lg studio-gold-badge text-[10px] font-semibold cursor-pointer flex items-center gap-1"
+                return (
+                  <div
+                    key={r.id}
+                    className="p-3.5 rounded-xl studio-card space-y-2 border studio-border"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase border ${
+                            modStatus === 'approved'
+                              ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                              : modStatus === 'rejected'
+                                ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                                : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          }`}
                         >
-                          <IconSliders size={11} />
-                          <span>Nạp Fix</span>
-                        </button>
-                      )}
+                          {modStatus === 'approved'
+                            ? 'Đang Áp Dụng'
+                            : modStatus === 'rejected'
+                              ? 'Từ Chối'
+                              : 'Chờ Duyệt'}
+                        </span>
+                        {modStatus === 'pending' && isInSandbox && (
+                          <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                            Sandbox Cá Nhân: BẬT
+                          </span>
+                        )}
+                        <span className="px-2 py-0.5 rounded studio-gold-badge text-[9px] font-mono uppercase">
+                          {r.defectType || r.category}
+                        </span>
+                        <h4 className="font-bold studio-text-primary text-xs">{r.title}</h4>
+                      </div>
 
-                      {isAdmin && (
-                        <>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {r.autoFixPatch && onApplyFix && (
                           <button
-                            onClick={() => handleToggleVerify(r)}
-                            className="px-2 py-1 rounded-lg studio-card hover:bg-[var(--bg-hover)] text-[10px] font-semibold cursor-pointer"
+                            onClick={() => {
+                              onApplyFix(r.autoFixPatch!);
+                              showMessage(`✓ Đã nạp thông số khắc phục từ mục "${r.title}"!`);
+                            }}
+                            className="px-2.5 py-1 rounded-lg studio-gold-badge text-[10px] font-semibold cursor-pointer flex items-center gap-1"
                           >
-                            {r.isVerified ? 'Tắt Học' : 'Duyệt Học'}
+                            <IconSliders size={11} />
+                            <span>Nạp Fix</span>
                           </button>
+                        )}
+
+                        {modStatus === 'pending' && (
                           <button
-                            onClick={() => setEditingRule(r)}
-                            className="px-2 py-1 rounded-lg studio-card hover:bg-[var(--bg-hover)] studio-text-gold text-[10px] font-semibold cursor-pointer"
+                            onClick={() => handleToggleSandbox(r.id)}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-semibold cursor-pointer border ${
+                              isInSandbox
+                                ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                                : 'studio-card studio-text-secondary border-transparent'
+                            }`}
                           >
-                            Sửa
+                            {isInSandbox ? 'Tắt Test Riêng' : 'Test Trên Máy Tôi'}
                           </button>
+                        )}
+
+                        {isAdmin && (
+                          <>
+                            {modStatus !== 'approved' && (
+                              <button
+                                onClick={() => handleModerateAction(r, 'approve')}
+                                className="px-2 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 text-[10px] font-bold cursor-pointer"
+                              >
+                                Duyệt
+                              </button>
+                            )}
+                            {modStatus === 'approved' && (
+                              <button
+                                onClick={() => handleModerateAction(r, 'unverify')}
+                                className="px-2 py-1 rounded-lg studio-card hover:bg-[var(--bg-hover)] text-[10px] font-semibold cursor-pointer"
+                              >
+                                Tạm ẩn
+                              </button>
+                            )}
+                            {modStatus !== 'rejected' && (
+                              <button
+                                onClick={() => {
+                                  setRejectingRuleId(rejectingRuleId === r.id ? null : r.id);
+                                  setRejectReasonInput('');
+                                }}
+                                className="px-2 py-1 rounded-lg bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 text-[10px] font-semibold cursor-pointer"
+                              >
+                                Từ chối
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setEditingRule(r)}
+                              className="px-2 py-1 rounded-lg studio-card hover:bg-[var(--bg-hover)] studio-text-gold text-[10px] font-semibold cursor-pointer"
+                            >
+                              Sửa
+                            </button>
+                            <button
+                              onClick={() => handleDeleteRule(r.id)}
+                              className="px-2 py-1 rounded-lg bg-rose-500/15 text-rose-400 hover:bg-rose-500/25 text-[10px] font-semibold cursor-pointer"
+                            >
+                              Xóa
+                            </button>
+                          </>
+                        )}
+
+                        {!isAdmin && isAuthor && modStatus !== 'approved' && (
                           <button
                             onClick={() => handleDeleteRule(r.id)}
                             className="px-2 py-1 rounded-lg bg-rose-500/15 text-rose-400 hover:bg-rose-500/25 text-[10px] font-semibold cursor-pointer"
                           >
-                            Xóa
+                            Rút bài
                           </button>
-                        </>
-                      )}
+                        )}
+                      </div>
+                    </div>
+
+                    {isAdmin && rejectingRuleId === r.id && (
+                      <div className="flex items-center gap-2 pt-1">
+                        <input
+                          type="text"
+                          value={rejectReasonInput}
+                          onChange={(e) => setRejectReasonInput(e.target.value)}
+                          placeholder="Nhập lý do từ chối gửi cho tác giả..."
+                          className="flex-1 px-2.5 py-1.5 rounded-lg glass-input text-[11px]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleModerateAction(r, 'reject', rejectReasonInput)
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-rose-600 text-white font-bold text-[11px] cursor-pointer"
+                        >
+                          Xác nhận từ chối
+                        </button>
+                      </div>
+                    )}
+
+                    {r.triggerCondition && (
+                      <div className="text-[10px] font-mono studio-text-gold">
+                        Điều kiện: {r.triggerCondition}
+                      </div>
+                    )}
+
+                    <p className="text-[11px] studio-text-secondary leading-relaxed">{r.content}</p>
+
+                    {r.rejectionReason && modStatus === 'rejected' && (
+                      <div className="text-[10px] text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded-lg px-2.5 py-1.5">
+                        Lý do từ chối: {r.rejectionReason}
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] studio-text-muted pt-1 border-t studio-border">
+                      <span>
+                        Đóng góp bởi: {r.submittedBy || 'Kỹ sư Laymor 3D'}
+                        {r.reviewedBy ? ` • Duyệt: ${r.reviewedBy}` : ''}
+                      </span>
+                      <span>Cập nhật: {new Date(r.updatedAt).toLocaleString('vi-VN')}</span>
                     </div>
                   </div>
+                );
+              })}
 
-                  {r.triggerCondition && (
-                    <div className="text-[10px] font-mono studio-text-gold">
-                      Điều kiện: {r.triggerCondition}
-                    </div>
-                  )}
-
-                  <p className="text-[11px] studio-text-secondary leading-relaxed">{r.content}</p>
-
-                  <div className="flex items-center justify-between text-[10px] studio-text-muted pt-1 border-t studio-border">
-                    <span>Đóng góp bởi: {r.submittedBy || 'Kỹ sư Laymor 3D'}</span>
-                    <span>Cập nhật: {r.updatedAt}</span>
-                  </div>
+              {filteredRules.length === 0 && (
+                <div className="p-6 text-center studio-text-muted text-xs">
+                  Chưa có quy tắc nào trong bộ lọc này.
                 </div>
-              ))}
+              )}
             </div>
           </div>
         )}
@@ -657,7 +1007,7 @@ export function DefectKnowledgeModal({
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="space-y-1">
                   <div className="text-sm font-bold studio-text-primary">
-                    Đang đăng nhập: {currentUser.displayName} ({currentUser.username || currentUser.id})
+                    Đang đăng nhập: {currentUserDisplay} ({currentUser.username || currentUser.id})
                   </div>
                   <div className="text-xs studio-text-secondary">
                     Vai trò hệ thống:{' '}
@@ -689,7 +1039,7 @@ export function DefectKnowledgeModal({
                   <span>Đăng Nhập Tài Khoản Laymor 3D / Master Admin</span>
                 </div>
                 <p className="text-[11px] studio-text-secondary">
-                  Đăng nhập bằng tài khoản được cấp hoặc tài khoản Master Admin để chỉnh sửa và phê duyệt kho kiến thức lỗi giả lập.
+                  Đăng nhập bằng tài khoản Laymor3D để gửi bài học AI (vào hàng chờ duyệt + test Sandbox cá nhân) hoặc đăng nhập Admin để kiểm duyệt toàn hệ thống.
                 </p>
 
                 {loginError && (
@@ -707,7 +1057,7 @@ export function DefectKnowledgeModal({
                     required
                     value={loginId}
                     onChange={(e) => setLoginId(e.target.value)}
-                    placeholder="Nhập ID (VD: hlcai_admin)"
+                    placeholder="Nhập ID (VD: hlcai_admin hoặc username của bạn)"
                     className="w-full px-3 py-2 rounded-xl glass-input text-xs font-mono"
                   />
                 </div>

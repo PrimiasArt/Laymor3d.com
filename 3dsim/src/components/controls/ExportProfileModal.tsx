@@ -9,6 +9,7 @@ import {
   download3MFProject,
   downloadBinarySTL,
   copyProfileToClipboard,
+  ensureOrcaExportSupportGeometryAsync,
 } from '@/services/slicerExporter';
 import { embedProtocol } from '@/services/embedProtocol';
 import {
@@ -86,9 +87,13 @@ export function ExportProfileModal({
     }
   };
 
-  const handleDownload3MF = () => {
+  const handleDownload3MF = async () => {
     if (!geometry) return;
     const withTree = hasSupportEnabled && includeSupportMesh;
+    if (withTree) {
+      setExportNotice('Đang kiểm tra / biên dịch lưới C++ Tree Support cho gói .3MF...');
+      await ensureOrcaExportSupportGeometryAsync(geometry, profile, modelTransform);
+    }
     const file = download3MFProject(
       geometry,
       profile,
@@ -99,15 +104,19 @@ export function ExportProfileModal({
     );
     setExportNotice(
       withTree
-        ? `Đã xuất .3MF kèm Tree Support 3D (đóng gói thành Object riêng biệt, không dính vào phôi): ${file}`
+        ? `Đã xuất .3MF kèm Tree Support C++ (đóng gói thành Object riêng biệt, không dính vào phôi): ${file}`
         : `Đã xuất .3MF phôi gốc sạch (${partCount} chi tiết rời, không kèm Tree Support): ${file}`
     );
     setTimeout(() => setExportNotice(null), 4000);
   };
 
-  const handleDownloadSTL = () => {
+  const handleDownloadSTL = async () => {
     if (!geometry) return;
     const withTree = hasSupportEnabled && includeSupportMesh;
+    if (withTree) {
+      setExportNotice('Đang kiểm tra / biên dịch lưới C++ Tree Support cho file STL...');
+      await ensureOrcaExportSupportGeometryAsync(geometry, profile, modelTransform);
+    }
     const file = downloadBinarySTL(
       geometry,
       modelName,
@@ -117,7 +126,7 @@ export function ExportProfileModal({
     );
     setExportNotice(
       withTree
-        ? `Đã xuất Binary STL kèm lưới Tree Support 3D: ${file}`
+        ? `Đã xuất Binary STL kèm lưới Tree Support C++: ${file}`
         : `Đã xuất Binary STL phôi gốc sạch (không kèm Tree Support): ${file}`
     );
     setTimeout(() => setExportNotice(null), 4000);

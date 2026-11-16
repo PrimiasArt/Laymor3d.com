@@ -342,8 +342,11 @@ export default function App() {
     [baseGeometry, modelTransform]
   );
 
+  const [latestOrcaStats, setLatestOrcaStats] = useState<IOrcaWasmSliceStats | null>(null);
+
   const handleOrcaStatsReady = useCallback((stats: IOrcaWasmSliceStats) => {
     setHasNativeBambuSupport(true);
+    setLatestOrcaStats(stats);
     setSimulationState((prev) => {
       const nextLayers = Math.max(1, stats.totalLayers);
       const nextTime = Math.max(10, stats.totalTimeSec);
@@ -361,10 +364,35 @@ export default function App() {
     });
   }, []);
 
-  // 4. Compute Slicing Metrics & Pre-flight Report
-  const slicingMetrics = React.useMemo(() => {
+  // Reset cached Orca C++ stats when active geometry or scale/rotation changes until next slice finishes
+  useEffect(() => {
+    setLatestOrcaStats(null);
+  }, [
+    geometry,
+    modelTransform.scale,
+    modelTransform.rotation[0],
+    modelTransform.rotation[1],
+    modelTransform.rotation[2],
+    profile.layerHeight,
+    profile.supportMode,
+    profile.treeStyle,
+    profile.infillDensity,
+  ]);
+
+  // 4. Compute Slicing Metrics & Pre-flight Report (authoritative C++ telemetry when ready)
+  const rawSlicingMetrics = React.useMemo(() => {
     return computeSlicingMetrics(geometry, profile, modelTransform.scale);
   }, [geometry, profile, modelTransform.scale]);
+
+  const slicingMetrics = React.useMemo(() => {
+    if (!latestOrcaStats) return rawSlicingMetrics;
+    return {
+      ...rawSlicingMetrics,
+      totalLayers: Math.max(1, latestOrcaStats.totalLayers),
+      estimatedPrintTimeSec: Math.max(10, latestOrcaStats.totalTimeSec),
+      estimatedFilamentGrams: Math.max(0.1, latestOrcaStats.totalFilamentGrams),
+    };
+  }, [rawSlicingMetrics, latestOrcaStats]);
 
   const preflightReport = React.useMemo(() => {
     return runPreflightInspection(geometry, profile, slicingMetrics, learnedDefectRules);
@@ -386,7 +414,7 @@ export default function App() {
     isCompleted: true,
   }));
 
-  // Đồng bộ lại simulation metrics khi geometry hoặc profile đổi
+  // Đồng bộ lại simulation metrics khi geometry hoặc profile đổi (không ghi đè stats C++ đã nhận)
   useEffect(() => {
     setSimulationState((prev) => {
       const curLayer = Math.min(slicingMetrics.totalLayers, Math.max(1, Math.floor(prev.currentProgress * slicingMetrics.totalLayers)));

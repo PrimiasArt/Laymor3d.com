@@ -7,6 +7,13 @@ import {
 } from '@/types/simulator';
 import { ISlicingMetrics } from './slicingEngine';
 
+export interface IStructuredTriggerCondition {
+  paramKey?: string;
+  operator?: '>' | '<' | '>=' | '<=' | '==' | '!=';
+  thresholdValue?: number | string | boolean;
+  description?: string;
+}
+
 export interface ICustomDefectKnowledgeRule {
   id: string;
   title: string;
@@ -14,16 +21,65 @@ export interface ICustomDefectKnowledgeRule {
   defectType?: DefectCategoryType;
   severity?: 'low' | 'medium' | 'high' | 'critical';
   triggerCondition?: string;
+  triggerSpec?: IStructuredTriggerCondition;
   content: string;
+  problemSymptom?: string;
+  rootCause?: string;
   tags: string[];
   autoFixPatch?: Partial<ISimulationProfile>;
+  submittedByUserId?: string;
   submittedBy?: string;
+  moderationStatus?: 'pending' | 'approved' | 'rejected' | 'archived';
+  reviewedBy?: string;
+  reviewedAt?: string;
+  rejectionReason?: string;
   isVerified: boolean;
   updatedAt: string;
 }
 
+const SANDBOX_STORAGE_KEY = 'laymor_sandbox_rule_ids';
+
+export function getPersonalSandboxRuleIds(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(SANDBOX_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setRulePersonalSandbox(ruleId: string, enabled: boolean): string[] {
+  if (typeof window === 'undefined') return [];
+  const current = new Set(getPersonalSandboxRuleIds());
+  if (enabled) {
+    current.add(ruleId);
+  } else {
+    current.delete(ruleId);
+  }
+  const next = Array.from(current);
+  try {
+    localStorage.setItem(SANDBOX_STORAGE_KEY, JSON.stringify(next));
+    window.dispatchEvent(new CustomEvent('laymor-knowledge-change'));
+  } catch {
+    // Ignore storage quota issues
+  }
+  return next;
+}
+
 // Bộ nhớ đệm lưu các quy tắc lỗi học từ Người dùng & Admin Database (/api/knowledge)
 let cachedLearnedRules: ICustomDefectKnowledgeRule[] = [];
+let lastKnowledgeStorageInfo: { storageBackend: string; storageLabel: string; persisted: boolean } = {
+  storageBackend: 'unknown',
+  storageLabel: 'Chưa đồng bộ',
+  persisted: false,
+};
+
+export function getKnowledgeStorageInfo() {
+  return lastKnowledgeStorageInfo;
+}
 
 export function setLearnedDefectRules(rules: ICustomDefectKnowledgeRule[]) {
   cachedLearnedRules = Array.isArray(rules) ? rules : [];
@@ -33,30 +89,76 @@ export function getLearnedDefectRules(): ICustomDefectKnowledgeRule[] {
   return cachedLearnedRules;
 }
 
+export function mapApiEntryToDefectRule(r: any): ICustomDefectKnowledgeRule {
+  const rawTrigger = r?.triggerCondition;
+  const triggerSpec: IStructuredTriggerCondition | undefined =
+    rawTrigger && typeof rawTrigger === 'object'
+      ? {
+          paramKey: rawTrigger.paramKey,
+          operator: rawTrigger.operator,
+          thresholdValue: rawTrigger.thresholdValue,
+          description: rawTrigger.description,
+        }
+      : undefined;
+
+  const modStatus =
+    r?.moderationStatus === 'pending' ||
+    r?.moderationStatus === 'approved' ||
+    r?.moderationStatus === 'rejected' ||
+    r?.moderationStatus === 'archived'
+      ? r.moderationStatus
+      : r?.isVerified
+        ? 'approved'
+        : 'pending';
+
+  return {
+    id: r.id,
+    title: r.title,
+    category: r.category || 'simulator_defect_learning',
+    defectType: r.defectType || 'custom_defect',
+    severity: r.severity || 'high',
+    triggerCondition:
+      typeof rawTrigger === 'string'
+        ? rawTrigger
+        : rawTrigger?.description || r.triggerConditionText || '',
+    triggerSpec,
+    content: r.content || r.solutionText || r.problemSymptom || '',
+    problemSymptom: r.problemSymptom,
+    rootCause: r.rootCause,
+    tags: Array.isArray(r.tags) ? r.tags : [],
+    autoFixPatch: r.autoFixPatch,
+    submittedByUserId: r.submittedByUserId,
+    submittedBy: r.submittedBy || 'maker_user',
+    moderationStatus: modStatus,
+    reviewedBy: r.reviewedBy,
+    reviewedAt: r.reviewedAt,
+    rejectionReason: r.rejectionReason,
+    isVerified: modStatus === 'approved' && Boolean(r.isVerified ?? true),
+    updatedAt: r.updatedAt || new Date().toISOString(),
+  };
+}
+
 export async function fetchLearnedDefectRulesFromDB(): Promise<ICustomDefectKnowledgeRule[]> {
   try {
-    const res = await fetch('/api/knowledge?category=simulator_defect_learning');
+    const savedUid =
+      typeof window !== 'undefined' ? localStorage.getItem('laymor_session_uid') || '' : '';
+    const res = await fetch('/api/knowledge?category=simulator_defect_learning', {
+      credentials: 'include',
+      cache: 'no-store',
+      headers: savedUid ? { 'x-laymor-uid': savedUid } : {},
+    });
     if (!res.ok) return cachedLearnedRules;
     const data = await res.json();
-    const rawList = data?.items || data?.entries;
+    if (data?.storageBackend) {
+      lastKnowledgeStorageInfo = {
+        storageBackend: data.storageBackend,
+        storageLabel: data.storageLabel || data.storageBackend,
+        persisted: Boolean(data.persisted),
+      };
+    }
+    const rawList = Array.isArray(data?.entries) ? data.entries : data?.items;
     if (Array.isArray(rawList)) {
-      cachedLearnedRules = rawList.map((r: any) => ({
-        id: r.id,
-        title: r.title,
-        category: r.category || 'simulator_defect_learning',
-        defectType: r.defectType || 'custom_defect',
-        severity: r.severity || 'high',
-        triggerCondition:
-          typeof r.triggerCondition === 'string'
-            ? r.triggerCondition
-            : r.triggerCondition?.description || '',
-        content: r.content || r.solutionText || r.problemSymptom || '',
-        tags: Array.isArray(r.tags) ? r.tags : [],
-        autoFixPatch: r.autoFixPatch,
-        submittedBy: r.submittedBy || 'hlcai_admin',
-        isVerified: r.isVerified ?? true,
-        updatedAt: r.updatedAt || new Date().toISOString(),
-      }));
+      cachedLearnedRules = rawList.map(mapApiEntryToDefectRule);
     }
     return cachedLearnedRules;
   } catch {
@@ -551,17 +653,58 @@ export function runPreflightInspection(
   }
 
   // ============================================================================
-  // 18. ĐÁNH GIÁ CÁC QUY TẮC LỖI HỌC TỪ CỘNG ĐỒNG & ADMIN DATABASE (/api/knowledge)
+  // 18. ĐÁNH GIÁ CÁC QUY TẮC LỖI HỌC TỪ CỘNG ĐỒNG & SANDBOX CÁ NHÂN (/api/knowledge)
   // ============================================================================
-  const activeLearnedRules = (externalRules || cachedLearnedRules).filter((r) => r.isVerified);
+  const sandboxSet = new Set(getPersonalSandboxRuleIds());
+  const candidateRules = externalRules || cachedLearnedRules;
+  const activeLearnedRules = candidateRules.filter((r) => {
+    const isApproved =
+      r.isVerified &&
+      r.moderationStatus !== 'rejected' &&
+      r.moderationStatus !== 'archived';
+    const isInPersonalSandbox =
+      sandboxSet.has(r.id) &&
+      r.moderationStatus !== 'rejected' &&
+      r.moderationStatus !== 'archived';
+    return isApproved || isInPersonalSandbox;
+  });
+
+  const evaluateStructuredTrigger = (
+    spec: IStructuredTriggerCondition | undefined,
+    prof: ISimulationProfile
+  ): boolean | null => {
+    if (!spec?.paramKey || spec.thresholdValue === undefined) return null;
+    const rawVal = (prof as unknown as Record<string, unknown>)[spec.paramKey];
+    if (rawVal === undefined) return null;
+    const op = spec.operator || '>';
+    const rhsNum = Number(spec.thresholdValue);
+    const lhsNum = Number(rawVal);
+
+    if (typeof rawVal === 'number' && !Number.isNaN(rhsNum)) {
+      if (op === '>') return lhsNum > rhsNum;
+      if (op === '<') return lhsNum < rhsNum;
+      if (op === '>=') return lhsNum >= rhsNum;
+      if (op === '<=') return lhsNum <= rhsNum;
+      if (op === '==') return Math.abs(lhsNum - rhsNum) < 1e-6;
+      if (op === '!=') return Math.abs(lhsNum - rhsNum) >= 1e-6;
+    }
+
+    const lhsStr = String(rawVal).toLowerCase();
+    const rhsStr = String(spec.thresholdValue).toLowerCase();
+    if (op === '==') return lhsStr === rhsStr;
+    if (op === '!=') return lhsStr !== rhsStr;
+    return false;
+  };
+
   for (const rule of activeLearnedRules) {
     // Tránh trùng lặp nếu đã có cùng ID
     if (errors.some((e) => e.id === rule.id)) continue;
 
-    // Kiểm tra điều kiện kích hoạt chính xác dựa trên ngữ cảnh rủi ro thực sự của bản in
     let matchesContext = false;
-
-    if (rule.defectType === 'overhang' && profile.supportMode === 'none' && overhangRatio > 0.03) {
+    const structuredMatch = evaluateStructuredTrigger(rule.triggerSpec, profile);
+    if (structuredMatch !== null) {
+      matchesContext = structuredMatch;
+    } else if (rule.defectType === 'overhang' && profile.supportMode === 'none' && overhangRatio > 0.03) {
       matchesContext = true;
     } else if (rule.defectType === 'warping' && needsBrimForWarping && !profile.brimEnabled) {
       matchesContext = true;
@@ -574,20 +717,21 @@ export function runPreflightInspection(
     }
 
     if (matchesContext) {
+      const isSandbox = !rule.isVerified && sandboxSet.has(rule.id);
       const mappedSeverity: 'critical' | 'warning' | 'info' =
         rule.severity === 'critical' || rule.severity === 'high'
           ? 'critical'
           : rule.severity === 'medium'
           ? 'warning'
           : 'info';
-      const penalty = mappedSeverity === 'critical' ? 12 : mappedSeverity === 'warning' ? 7 : 4;
+      const penalty = isSandbox ? 0 : mappedSeverity === 'critical' ? 12 : mappedSeverity === 'warning' ? 7 : 4;
       score -= penalty;
 
       errors.push({
         id: rule.id,
         type: rule.defectType || 'custom_defect',
         severity: mappedSeverity,
-        title: `[AI Learned] ${rule.title}`,
+        title: `${isSandbox ? '[Sandbox Cá Nhân]' : '[AI Learned]'} ${rule.title}`,
         description: rule.content,
         rootCause: rule.triggerCondition
           ? `Điều kiện kích hoạt từ Knowledge DB: ${rule.triggerCondition}`
@@ -598,7 +742,9 @@ export function runPreflightInspection(
         impactScorePenalty: penalty,
         autoFixAction: rule.autoFixPatch,
         isLearnedFromCommunity: true,
-        contributor: rule.submittedBy || 'Laymor Knowledge DB',
+        contributor: isSandbox
+          ? `${rule.submittedBy || 'Bạn'} (Chế độ thử nghiệm riêng)`
+          : rule.submittedBy || 'Laymor Knowledge DB',
       });
     }
   }

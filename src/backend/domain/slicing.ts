@@ -18,9 +18,11 @@ export type SupportType = 'tree' | 'normal' | 'none';
 export interface ISupportConfig {
   enabled: boolean;
   type: SupportType;
+  treeStyle?: 'organic' | 'slim' | 'strong' | 'hybrid';
   overhangThresholdDegrees: number; // Ví dụ: 45° hoặc 55°
   supportDensityPercent: number; // 10% - 25%
   interfaceLayers: number;
+  branchDiameterMm?: number;
 }
 
 export interface IPrintEstimation {

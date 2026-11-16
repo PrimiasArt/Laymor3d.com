@@ -13,7 +13,11 @@ import {
   DefectSeverity,
 } from '@/types/simulator';
 import { detectOverhangPatches } from './supportGenerator';
-import { getLearnedDefectRules, ICustomDefectKnowledgeRule } from './preflightAnalyzer';
+import {
+  getLearnedDefectRules,
+  getPersonalSandboxRuleIds,
+  ICustomDefectKnowledgeRule,
+} from './preflightAnalyzer';
 
 const STORAGE_KEY_GEMINI = '3d_sim_gemini_api_key';
 const STORAGE_KEY_GEMINI_MODEL = '3d_sim_gemini_model_id';
@@ -470,7 +474,12 @@ export function matchWorkshopKnowledgeRules(
   metrics: ReturnType<typeof extractGeometryMetrics>,
   profile: ISimulationProfile
 ): IMatchedKnowledgeRuleSummary[] {
-  const learnedRules = getLearnedDefectRules();
+  const sandboxSet = new Set(getPersonalSandboxRuleIds());
+  const learnedRules = getLearnedDefectRules().filter(
+    (r) =>
+      (r.isVerified && r.moderationStatus !== 'rejected' && r.moderationStatus !== 'archived') ||
+      (sandboxSet.has(r.id) && r.moderationStatus !== 'rejected' && r.moderationStatus !== 'archived')
+  );
   const allRules = [...learnedRules, ...BUILTIN_WORKSHOP_KNOWLEDGE];
   const matched: IMatchedKnowledgeRuleSummary[] = [];
   const seenIds = new Set<string>();

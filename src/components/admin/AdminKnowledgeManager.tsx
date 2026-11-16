@@ -25,6 +25,13 @@ export function AdminKnowledgeManager() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [selectedStatus, setSelectedStatus] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
+  const [storageLabel, setStorageLabel] = useState<string>('Đang kiểm tra...');
+  const [moderationCounts, setModerationCounts] = useState({ pending: 0, approved: 0, rejected: 0, archived: 0 });
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [showAuditLogs, setShowAuditLogs] = useState(false);
+  const [rejectTargetId, setRejectTargetId] = useState<string | null>(null);
+  const [rejectReasonText, setRejectReasonText] = useState('');
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
 
   // Modal Thêm / Chỉnh sửa tri thức & lỗi giả lập
@@ -52,11 +59,19 @@ export function AdminKnowledgeManager() {
       const params = new URLSearchParams();
       if (searchQuery.trim()) params.set('query', searchQuery.trim());
       if (selectedCategory !== 'all') params.set('category', selectedCategory);
+      if (selectedStatus !== 'all') params.set('status', selectedStatus);
+      params.set('includeAudit', '1');
 
-      const res = await fetch(`/api/knowledge?${params.toString()}`);
+      const res = await fetch(`/api/knowledge?${params.toString()}`, {
+        credentials: 'include',
+        cache: 'no-store',
+      });
       const data = await res.json();
       if (data.success && Array.isArray(data.entries)) {
         setEntries(data.entries);
+        if (data.storageLabel) setStorageLabel(data.storageLabel);
+        if (data.moderationCounts) setModerationCounts(data.moderationCounts);
+        if (Array.isArray(data.auditLogs)) setAuditLogs(data.auditLogs);
       }
     } catch (err) {
       console.error('Error fetching knowledge:', err);
@@ -67,7 +82,7 @@ export function AdminKnowledgeManager() {
 
   useEffect(() => {
     fetchKnowledge();
-  }, [selectedCategory]);
+  }, [selectedCategory, selectedStatus]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -116,32 +131,46 @@ export function AdminKnowledgeManager() {
     setIsModalOpen(true);
   };
 
-  const handleToggleVerified = async (entry: IKnowledgeEntry) => {
+  const handleModerateEntry = async (
+    id: string,
+    action: 'approve' | 'reject' | 'unverify',
+    rejectionReason?: string
+  ) => {
     try {
       const res = await fetch('/api/knowledge', {
-        method: 'POST',
+        method: 'PATCH',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...entry,
-          isVerified: !entry.isVerified,
-        }),
+        body: JSON.stringify({ id, action, rejectionReason }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
+        setRejectTargetId(null);
+        setRejectReasonText('');
         fetchKnowledge();
+      } else {
+        alert(data.error || 'Không thể kiểm duyệt quy tắc.');
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      alert(`Lỗi: ${err.message}`);
     }
+  };
+
+  const handleToggleVerified = async (entry: IKnowledgeEntry) => {
+    await handleModerateEntry(entry.id, entry.isVerified ? 'unverify' : 'approve');
   };
 
   const handleDelete = async (id: string, title: string) => {
     if (!confirm(`Bạn có chắc chắn muốn xóa quy tắc tri thức "${title}"?`)) return;
     try {
-      const res = await fetch(`/api/knowledge?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const res = await fetch(`/api/knowledge?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
       const data = await res.json();
       if (data.success) {
         setEntries((prev) => prev.filter((e) => e.id !== id));
+        fetchKnowledge();
       } else {
         alert(data.error || 'Không thể xóa');
       }
@@ -201,6 +230,7 @@ export function AdminKnowledgeManager() {
 
       const res = await fetch('/api/knowledge', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
@@ -330,10 +360,67 @@ export function AdminKnowledgeManager() {
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
           </form>
 
-          <div className="text-xs text-slate-500">
-            Hiển thị <strong className="text-slate-800">{entries.length}</strong> bản ghi tri thức
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-mono text-[11px] font-bold">
+              Storage: {storageLabel}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowAuditLogs((v) => !v)}
+              className="px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-[11px] font-bold cursor-pointer"
+            >
+              {showAuditLogs ? 'Ẩn Nhật Ký' : `Nhật Ký Kiểm Duyệt (${auditLogs.length})`}
+            </button>
+            <span>
+              Hiển thị <strong className="text-slate-800">{entries.length}</strong> bản ghi
+            </span>
           </div>
         </div>
+
+        {/* Status Moderation Filter Tabs */}
+        <div className="flex flex-wrap gap-2 items-center pt-2 border-t border-slate-100">
+          {[
+            { id: 'all', label: 'Tất Cả Trạng Thái' },
+            { id: 'pending', label: `Hàng Chờ Duyệt (${moderationCounts.pending})` },
+            { id: 'approved', label: `Đang Áp Dụng (${moderationCounts.approved})` },
+            { id: 'rejected', label: `Đã Từ Chối (${moderationCounts.rejected})` },
+          ].map((st) => (
+            <button
+              key={st.id}
+              type="button"
+              onClick={() => setSelectedStatus(st.id as any)}
+              className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all border cursor-pointer ${
+                selectedStatus === st.id
+                  ? 'bg-slate-900 text-white border-slate-900 font-bold shadow-sm'
+                  : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+              }`}
+            >
+              {st.label}
+            </button>
+          ))}
+        </div>
+
+        {showAuditLogs && (
+          <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 space-y-1.5 max-h-48 overflow-y-auto text-[11px]">
+            <div className="font-bold text-slate-700 uppercase text-[10px]">
+              Nhật Ký Kiểm Duyệt &amp; Đóng Góp Gần Nhất
+            </div>
+            {auditLogs.length === 0 ? (
+              <div className="text-slate-400">Chưa có nhật ký nào.</div>
+            ) : (
+              auditLogs.map((log) => (
+                <div key={log.id} className="flex flex-wrap justify-between gap-2 border-b border-slate-200/70 pb-1">
+                  <span className="text-slate-800">
+                    <strong>{log.actorName}</strong>: {log.actionTitle} — {log.description}
+                  </span>
+                  <span className="text-slate-400 font-mono">
+                    {new Date(log.timestamp).toLocaleString('vi-VN')}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-2 items-center pt-2 border-t border-slate-100">
           {categories.map((c) => (
@@ -378,20 +465,42 @@ export function AdminKnowledgeManager() {
                       )}
                     </div>
 
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => handleToggleVerified(entry)}
                         className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 cursor-pointer transition-all ${
-                          entry.isVerified
-                            ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
-                            : 'bg-amber-50 text-amber-800 border-amber-300'
+                          entry.moderationStatus === 'rejected'
+                            ? 'bg-rose-50 text-rose-700 border-rose-300'
+                            : entry.isVerified
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                              : 'bg-amber-50 text-amber-800 border-amber-300'
                         }`}
-                        title="Bấm để bật/tắt trạng thái áp dụng học cho App giả lập"
+                        title="Bấm để duyệt hoặc tạm ẩn quy tắc này"
                       >
                         <CheckCircle2 className="w-3 h-3" />
-                        <span>{entry.isVerified ? 'Đang Áp Dụng Học' : 'Chờ Duyệt'}</span>
+                        <span>
+                          {entry.moderationStatus === 'rejected'
+                            ? 'Đã Từ Chối'
+                            : entry.isVerified
+                              ? 'Đang Áp Dụng Học'
+                              : 'Chờ Duyệt (Bấm Duyệt)'}
+                        </span>
                       </button>
+
+                      {entry.moderationStatus !== 'rejected' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRejectTargetId(rejectTargetId === entry.id ? null : entry.id);
+                            setRejectReasonText('');
+                          }}
+                          className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 text-[10px] font-bold cursor-pointer"
+                          title="Từ chối kèm lý do"
+                        >
+                          Từ chối
+                        </button>
+                      )}
 
                       <button
                         type="button"
@@ -412,6 +521,31 @@ export function AdminKnowledgeManager() {
                       </button>
                     </div>
                   </div>
+
+                  {rejectTargetId === entry.id && (
+                    <div className="flex items-center gap-2 p-2 rounded-xl bg-rose-50 border border-rose-200">
+                      <input
+                        type="text"
+                        value={rejectReasonText}
+                        onChange={(e) => setRejectReasonText(e.target.value)}
+                        placeholder="Nhập lý do từ chối gửi lại tác giả..."
+                        className="flex-1 px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-xs text-slate-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleModerateEntry(entry.id, 'reject', rejectReasonText)}
+                        className="px-3 py-1 rounded-lg bg-rose-600 text-white text-xs font-bold cursor-pointer"
+                      >
+                        Xác nhận
+                      </button>
+                    </div>
+                  )}
+
+                  {entry.rejectionReason && entry.moderationStatus === 'rejected' && (
+                    <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-1.5">
+                      Lý do từ chối: {entry.rejectionReason}
+                    </div>
+                  )}
 
                   {/* Title */}
                   <h3 className="font-bold text-sm sm:text-base text-slate-900 leading-snug">

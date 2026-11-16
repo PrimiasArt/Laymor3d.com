@@ -28,7 +28,7 @@ import {
 } from '@/components/icons/MinimalIcons';
 import { IExpertPrintProfile, IExpertPrintProfileVariant } from '@/backend/domain/wallet';
 import { IPrinterProfile, ISupportConfig } from '@/backend/domain/slicing';
-import { PresetGeneratorService } from '@/backend/services/slicing/PresetGeneratorService';
+import { PresetGeneratorService } from '../backend/slicing/PresetGeneratorService';
 
 interface ExpertProfileCardProps {
   profile: IExpertPrintProfile;
@@ -437,8 +437,8 @@ export function ExpertProfileCard({
     }
   };
 
-  const handleExportProfile = () => {
-    const filename = PresetGeneratorService.downloadPreset(
+  const handleExportProfile = async () => {
+    const filename = await PresetGeneratorService.downloadPresetAsync(
       activeProfile,
       printer,
       dimensionsMm,

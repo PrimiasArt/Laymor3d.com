@@ -91,6 +91,14 @@ const nextConfig: NextConfig = {
         source: '/3dsim/:path*',
         headers: isolationHeaders,
       },
+      {
+        source: '/studio',
+        headers: isolationHeaders,
+      },
+      {
+        source: '/studio/:path*',
+        headers: isolationHeaders,
+      },
     ];
   },
   async rewrites() {

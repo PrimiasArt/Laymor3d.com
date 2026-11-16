@@ -206,6 +206,10 @@ class SupabaseCloudService {
     return this.getStatus();
   }
 
+  get isConfigured(): boolean {
+    return this.getCredentials().configured;
+  }
+
   getStatus() {
     const { url, key, configured } = this.getCredentials();
     return {

@@ -1,4 +1,5 @@
 import { IGeometryFingerprint } from './GeometryFingerprintEngine';
+import { executeNeonQuery, isNeonConfigured } from '../neon/neonClient';
 
 export interface ISlicerProfileInput {
   material: 'PLA' | 'PETG' | 'ABS' | 'ASA' | 'TPU' | string;
@@ -35,6 +36,10 @@ export interface IHistoricalLearningCase {
   outcome: RealPrintOutcome;
   aiInsightLesson: string;
   recordedAt: string;
+  moderationStatus?: 'pending' | 'approved' | 'rejected' | 'archived';
+  submittedByUserId?: string;
+  submittedBy?: string;
+  trustWeight?: number;
 }
 
 export interface ISimilarCaseMatch {
@@ -168,14 +173,306 @@ export const SEED_HISTORICAL_LEARNING_CASES: IHistoricalLearningCase[] = [
   },
 ];
 
-let runtimeLearningDataset: IHistoricalLearningCase[] = [...SEED_HISTORICAL_LEARNING_CASES];
+let runtimeLearningDataset: IHistoricalLearningCase[] = SEED_HISTORICAL_LEARNING_CASES.map((c) => ({
+  ...c,
+  moderationStatus: 'approved',
+  trustWeight: 1.0,
+}));
+let learningSchemaReadyPromise: Promise<boolean> | null = null;
+
+interface NeonLearningRow {
+  id: string;
+  model_name: string;
+  material: string;
+  category: string;
+  geometry_signature: any;
+  slicer_params: any;
+  outcome_status: RealPrintOutcome;
+  failure_defect: string | null;
+  operator_notes: string | null;
+  trust_weight: number | null;
+  moderation_status: 'pending' | 'approved' | 'rejected' | 'archived' | null;
+  submitted_by_user_id: string | null;
+  submitted_by: string | null;
+  created_at: string | Date;
+}
+
+function inferGeometryCategory(fp: IGeometryFingerprint): string {
+  if (fp.overhangArea45Mm2 > 400) return 'HIGH_OVERHANG';
+  if (fp.comHeightRatio > 1.8) return 'TALL_SLENDER';
+  if (fp.maxIslandsPerLayer >= 6) return 'MULTI_ISLAND';
+  return 'STANDARD_MESH';
+}
+
+function rowToLearningCase(row: NeonLearningRow): IHistoricalLearningCase {
+  const sig =
+    typeof row.geometry_signature === 'string'
+      ? JSON.parse(row.geometry_signature)
+      : row.geometry_signature || {};
+  const params =
+    typeof row.slicer_params === 'string'
+      ? JSON.parse(row.slicer_params)
+      : row.slicer_params || {};
+
+  return {
+    caseId: row.id,
+    modelId: sig.modelId || row.failure_defect || 'mdl_neon',
+    modelName: row.model_name,
+    material: row.material,
+    fingerprint: sig,
+    goldenProfile: params,
+    outcome: row.outcome_status || 'SIM_GOLDEN_PROFILE',
+    aiInsightLesson: row.operator_notes || '',
+    recordedAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    moderationStatus: row.moderation_status || 'pending',
+    submittedByUserId: row.submitted_by_user_id || undefined,
+    submittedBy: row.submitted_by || undefined,
+    trustWeight: typeof row.trust_weight === 'number' ? row.trust_weight : 1.0,
+  };
+}
+
+async function ensureLearningSchemaAndSeed(): Promise<boolean> {
+  if (!isNeonConfigured()) return false;
+  if (learningSchemaReadyPromise) return learningSchemaReadyPromise;
+
+  learningSchemaReadyPromise = (async () => {
+    try {
+      const ddl = [
+        `CREATE TABLE IF NOT EXISTS ai_learning_cases (
+          id VARCHAR(64) PRIMARY KEY,
+          model_name TEXT NOT NULL,
+          material VARCHAR(32) NOT NULL,
+          category VARCHAR(48) NOT NULL,
+          geometry_signature JSONB NOT NULL DEFAULT '{}'::jsonb,
+          feature_vector DOUBLE PRECISION[] NOT NULL DEFAULT ARRAY[]::DOUBLE PRECISION[],
+          slicer_params JSONB NOT NULL DEFAULT '{}'::jsonb,
+          outcome_status VARCHAR(24) NOT NULL,
+          failure_defect TEXT,
+          operator_notes TEXT,
+          trust_weight DOUBLE PRECISION DEFAULT 1.0,
+          moderation_status VARCHAR(24) DEFAULT 'pending',
+          submitted_by_user_id VARCHAR(64),
+          submitted_by VARCHAR(120),
+          reviewed_by VARCHAR(120),
+          reviewed_at TIMESTAMP WITH TIME ZONE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );`,
+        `CREATE INDEX IF NOT EXISTS idx_ai_learning_status ON ai_learning_cases (moderation_status);`,
+      ];
+      for (const s of ddl) {
+        const res = await executeNeonQuery(s);
+        if (!res.success) return false;
+      }
+
+      const cnt = await executeNeonQuery<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt FROM ai_learning_cases`
+      );
+      if (Number(cnt.data?.[0]?.cnt || '0') === 0) {
+        for (const seed of SEED_HISTORICAL_LEARNING_CASES) {
+          const vec = normalizeGeometryVector(seed.fingerprint);
+          await executeNeonQuery(
+            `INSERT INTO ai_learning_cases (
+              id, model_name, material, category, geometry_signature, feature_vector,
+              slicer_params, outcome_status, failure_defect, operator_notes, trust_weight,
+              moderation_status, submitted_by_user_id, submitted_by, reviewed_by, reviewed_at, created_at
+            ) VALUES (
+              $1, $2, $3, $4, $5::jsonb, $6::double precision[],
+              $7::jsonb, $8, $9, $10, 1.0,
+              'approved', 'usr-admin-01', 'Laymor Engineering Lab', 'system_seed', $11, $11
+            ) ON CONFLICT (id) DO NOTHING`,
+            [
+              seed.caseId,
+              seed.modelName,
+              seed.material,
+              inferGeometryCategory(seed.fingerprint),
+              JSON.stringify(seed.fingerprint),
+              vec,
+              JSON.stringify(seed.goldenProfile),
+              seed.outcome,
+              seed.modelId,
+              seed.aiInsightLesson,
+              seed.recordedAt,
+            ]
+          );
+        }
+      }
+      return true;
+    } catch {
+      learningSchemaReadyPromise = null;
+      return false;
+    }
+  })();
+
+  const ok = await learningSchemaReadyPromise;
+  if (!ok) learningSchemaReadyPromise = null;
+  return ok;
+}
 
 export function getRuntimeLearningDataset(): IHistoricalLearningCase[] {
   return runtimeLearningDataset;
 }
 
 export function addRuntimeLearningCase(newCase: IHistoricalLearningCase): void {
-  runtimeLearningDataset = [newCase, ...runtimeLearningDataset.slice(0, 199)];
+  const normalized: IHistoricalLearningCase = {
+    moderationStatus: 'approved',
+    trustWeight: 1.0,
+    ...newCase,
+  };
+  runtimeLearningDataset = [
+    normalized,
+    ...runtimeLearningDataset.filter((c) => c.caseId !== normalized.caseId).slice(0, 198),
+  ];
+}
+
+export async function fetchLearningCasesDurableAsync(opts?: {
+  includeAllForAdmin?: boolean;
+  userId?: string;
+}): Promise<{ cases: IHistoricalLearningCase[]; persistedBackend: 'neon_postgres' | 'local_memory' }> {
+  if (isNeonConfigured()) {
+    const ok = await ensureLearningSchemaAndSeed();
+    if (ok) {
+      const res = await executeNeonQuery<NeonLearningRow>(
+        `SELECT * FROM ai_learning_cases ORDER BY created_at DESC LIMIT 200`
+      );
+      if (res.success && Array.isArray(res.data)) {
+        const all = res.data.map(rowToLearningCase);
+        runtimeLearningDataset = all.filter(
+          (c) => !c.moderationStatus || c.moderationStatus === 'approved'
+        );
+        const visible = opts?.includeAllForAdmin
+          ? all
+          : all.filter(
+              (c) =>
+                !c.moderationStatus ||
+                c.moderationStatus === 'approved' ||
+                (opts?.userId && c.submittedByUserId === opts.userId)
+            );
+        return { cases: visible, persistedBackend: 'neon_postgres' };
+      }
+    }
+  }
+  const approved = runtimeLearningDataset.filter(
+    (c) => !c.moderationStatus || c.moderationStatus === 'approved' || (opts?.userId && c.submittedByUserId === opts.userId)
+  );
+  return { cases: approved, persistedBackend: 'local_memory' };
+}
+
+export async function recordLearningCaseDurableAsync(
+  newCase: IHistoricalLearningCase
+): Promise<{
+  learningCase: IHistoricalLearningCase;
+  persistedToDb: boolean;
+  totalCases: number;
+  error?: string;
+}> {
+  if (isNeonConfigured()) {
+    const ok = await ensureLearningSchemaAndSeed();
+    if (!ok) {
+      return {
+        learningCase: newCase,
+        persistedToDb: false,
+        totalCases: runtimeLearningDataset.length,
+        error: 'Không thể khởi tạo bảng ai_learning_cases trên Neon PostgreSQL.',
+      };
+    }
+
+    const vec = normalizeGeometryVector(newCase.fingerprint);
+    const status = newCase.moderationStatus || 'pending';
+    const isApproved = status === 'approved';
+    const res = await executeNeonQuery<NeonLearningRow>(
+      `INSERT INTO ai_learning_cases (
+        id, model_name, material, category, geometry_signature, feature_vector,
+        slicer_params, outcome_status, failure_defect, operator_notes, trust_weight,
+        moderation_status, submitted_by_user_id, submitted_by, reviewed_by, reviewed_at, created_at
+      ) VALUES (
+        $1, $2, $3, $4, $5::jsonb, $6::double precision[],
+        $7::jsonb, $8, $9, $10, $11,
+        $12, $13, $14, $15, $16, $17
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        operator_notes = EXCLUDED.operator_notes,
+        moderation_status = EXCLUDED.moderation_status,
+        slicer_params = EXCLUDED.slicer_params,
+        reviewed_by = EXCLUDED.reviewed_by,
+        reviewed_at = EXCLUDED.reviewed_at
+      RETURNING *`,
+      [
+        newCase.caseId,
+        newCase.modelName,
+        newCase.material,
+        inferGeometryCategory(newCase.fingerprint),
+        JSON.stringify({ ...newCase.fingerprint, modelId: newCase.modelId }),
+        vec,
+        JSON.stringify(newCase.goldenProfile || {}),
+        newCase.outcome,
+        newCase.modelId,
+        newCase.aiInsightLesson,
+        newCase.trustWeight ?? (isApproved ? 1.0 : 0.75),
+        status,
+        newCase.submittedByUserId || null,
+        newCase.submittedBy || null,
+        isApproved ? newCase.submittedBy || 'admin' : null,
+        isApproved ? newCase.recordedAt : null,
+        newCase.recordedAt,
+      ]
+    );
+
+    if (res.success && res.data?.[0]) {
+      const saved = rowToLearningCase(res.data[0]);
+      if (saved.moderationStatus === 'approved') {
+        addRuntimeLearningCase(saved);
+      }
+      const fetched = await fetchLearningCasesDurableAsync({ includeAllForAdmin: false });
+      return {
+        learningCase: saved,
+        persistedToDb: true,
+        totalCases: fetched.cases.length,
+      };
+    }
+
+    return {
+      learningCase: newCase,
+      persistedToDb: false,
+      totalCases: runtimeLearningDataset.length,
+      error: res.error || 'Lỗi lưu ca học hình học vào Neon Postgres.',
+    };
+  }
+
+  addRuntimeLearningCase(newCase);
+  return {
+    learningCase: newCase,
+    persistedToDb: false,
+    totalCases: runtimeLearningDataset.length,
+  };
+}
+
+export async function moderateLearningCaseDurableAsync(params: {
+  caseId: string;
+  action: 'approve' | 'reject';
+  reviewerName: string;
+}): Promise<{ persistedToDb: boolean; error?: string }> {
+  if (!isNeonConfigured()) {
+    runtimeLearningDataset = runtimeLearningDataset.map((c) =>
+      c.caseId === params.caseId
+        ? { ...c, moderationStatus: params.action === 'approve' ? 'approved' : 'rejected' }
+        : c
+    );
+    return { persistedToDb: false };
+  }
+  const ok = await ensureLearningSchemaAndSeed();
+  if (!ok) return { persistedToDb: false, error: 'DB unavailable' };
+  const status = params.action === 'approve' ? 'approved' : 'rejected';
+  const res = await executeNeonQuery(
+    `UPDATE ai_learning_cases
+     SET moderation_status = $1, reviewed_by = $2, reviewed_at = CURRENT_TIMESTAMP
+     WHERE id = $3`,
+    [status, params.reviewerName, params.caseId]
+  );
+  if (res.success) {
+    await fetchLearningCasesDurableAsync({ includeAllForAdmin: false });
+    return { persistedToDb: true };
+  }
+  return { persistedToDb: false, error: res.error };
 }
 
 export function normalizeGeometryVector(fp: IGeometryFingerprint): number[] {

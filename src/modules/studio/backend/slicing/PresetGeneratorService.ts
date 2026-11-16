@@ -1,17 +1,46 @@
 import * as THREE from 'three';
 import { IExpertPrintProfile } from '@/backend/domain/wallet';
 import { IPrinterProfile, ISupportConfig } from '@/backend/domain/slicing';
-import { ModelBuilder } from '@/components/viewer/ModelBuilder';
-import { SupportBuilder } from '@/components/viewer/SupportBuilder';
+import { ModelBuilder } from '../viewer/ModelBuilder';
+import { SupportBuilder } from '../viewer/SupportBuilder';
 import { SampleModelId } from '@/backend/domain/sample-models';
 import { zipSync, strToU8 } from 'three/examples/jsm/libs/fflate.module.js';
 
 export class PresetGeneratorService {
+  private static resolveSampleId(modelNameOrId: string): SampleModelId {
+    const rawId = (modelNameOrId || 'benchy').toLowerCase();
+    const validIds: SampleModelId[] = ['benchy', 'dragon', 'robot', 'gear', 'helmet', 'turbine', 'eiffel'];
+    if (validIds.includes(rawId as SampleModelId)) return rawId as SampleModelId;
+    return validIds.find((id) => rawId.includes(id)) || 'benchy';
+  }
+
   /**
    * Generates and triggers download of a real Slicer Preset (.3MF project bundle)
    * Packed as a true 3MF OPC zip archive containing real 3D geometry and slicer settings.
    * Fully compatible with Bambu Studio, OrcaSlicer, PrusaSlicer, and 3D Hub Studio.
    */
+  static async downloadPresetAsync(
+    profile: IExpertPrintProfile,
+    printer?: IPrinterProfile,
+    dimensionsMm?: { x: number; y: number; z: number },
+    supportConfig?: ISupportConfig,
+    customGroup?: THREE.Group
+  ): Promise<string> {
+    const sType = supportConfig?.enabled === false ? 'none' : (supportConfig?.type || 'tree');
+    if (sType !== 'none') {
+      await SupportBuilder.buildSupportsAsync({
+        type: sType,
+        modelId: customGroup ? 'custom' : this.resolveSampleId(profile.modelId),
+        sourceGroup: customGroup,
+        dimensionsMm,
+        overhangThresholdDeg: supportConfig?.overhangThresholdDegrees,
+        branchDiameterMm: supportConfig?.branchDiameterMm,
+        interfaceLayers: supportConfig?.interfaceLayers,
+      }).catch(() => undefined);
+    }
+    return this.downloadPreset(profile, printer, dimensionsMm, supportConfig, customGroup);
+  }
+
   static downloadPreset(
     profile: IExpertPrintProfile,
     printer?: IPrinterProfile,
@@ -112,7 +141,8 @@ export class PresetGeneratorService {
         sType,
         customGroup ? 'custom' : sampleId,
         undefined,
-        customGroup ? modelSubGroup : undefined
+        customGroup ? modelSubGroup : undefined,
+        dimensionsMm
       );
       builtGroup.add(supportMeshGroup);
     }
@@ -283,12 +313,12 @@ z_hop = ${profile.zHopMm}
   /**
    * Generates and downloads a real Binary STL file of the active 3D model scaled to dimensionsMm
    */
-  static downloadSTL(
+  static async downloadSTL(
     modelName: string,
     dimensionsMm?: { x: number; y: number; z: number },
     customGroup?: THREE.Group,
     supportConfig?: ISupportConfig
-  ): string {
+  ): Promise<string> {
     const filename = `${modelName.replace(/[^a-zA-Z0-9_-]/g, '_')}_Model.stl`;
 
     const builtGroup = new THREE.Group();
@@ -322,18 +352,74 @@ z_hop = ${profile.zHopMm}
 
     const sType = supportConfig?.enabled === false ? 'none' : (supportConfig?.type || 'tree');
     if (sType !== 'none') {
+      await SupportBuilder.buildSupportsAsync({
+        type: sType,
+        modelId: customGroup ? 'custom' : sampleId,
+        sourceGroup: customGroup ? modelSubGroup : undefined,
+        dimensionsMm: { x: targetX, y: targetY, z: targetZ },
+        overhangThresholdDeg: supportConfig?.overhangThresholdDegrees,
+        branchDiameterMm: supportConfig?.branchDiameterMm,
+        interfaceLayers: supportConfig?.interfaceLayers,
+      }).catch(() => undefined);
       const supportMeshGroup = SupportBuilder.buildSupports(
         sType,
         customGroup ? 'custom' : sampleId,
         undefined,
-        customGroup ? modelSubGroup : undefined
+        customGroup ? modelSubGroup : undefined,
+        dimensionsMm
       );
       builtGroup.add(supportMeshGroup);
     }
 
-    if (size.x > 0.001 && size.y > 0.001 && size.z > 0.001) {
+    const buffer = this.serializeGroupToBinaryStl(builtGroup, size, modelName, dimensionsMm);
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+
+    return filename;
+  }
+
+  /**
+   * Synchronously builds a clean Binary STL ArrayBuffer scaled to target millimeter dimensions (for /studio -> /3dsim bridge).
+   */
+  static generateSTLBuffer(
+    modelName: string,
+    dimensionsMm?: { x: number; y: number; z: number },
+    customGroup?: THREE.Group
+  ): ArrayBuffer {
+    const builtGroup = new THREE.Group();
+    const sampleId = this.resolveSampleId(modelName);
+    const modelSubGroup = customGroup
+      ? customGroup.clone(true)
+      : ModelBuilder.buildModel(sampleId, new THREE.MeshBasicMaterial()).group;
+    builtGroup.add(modelSubGroup);
+
+    modelSubGroup.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(modelSubGroup);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    return this.serializeGroupToBinaryStl(builtGroup, size, modelName, dimensionsMm);
+  }
+
+  private static serializeGroupToBinaryStl(
+    builtGroup: THREE.Group,
+    modelSize: THREE.Vector3,
+    modelName: string,
+    dimensionsMm?: { x: number; y: number; z: number }
+  ): ArrayBuffer {
+    const targetX = dimensionsMm?.x || 80;
+    const targetY = dimensionsMm?.y || 80;
+    const targetZ = dimensionsMm?.z || 80;
+
+    if (modelSize.x > 0.001 && modelSize.y > 0.001 && modelSize.z > 0.001) {
       builtGroup.scale.multiply(
-        new THREE.Vector3(targetX / size.x, targetZ / size.y, targetY / size.z)
+        new THREE.Vector3(targetX / modelSize.x, targetZ / modelSize.y, targetY / modelSize.z)
       );
       builtGroup.updateMatrixWorld(true);
     }
@@ -341,7 +427,6 @@ z_hop = ${profile.zHopMm}
     const scaledBox = new THREE.Box3().setFromObject(builtGroup);
     const minY = scaledBox.min.y;
 
-    // Collect all triangles in Z-up millimeter space
     const triangles: Array<[THREE.Vector3, THREE.Vector3, THREE.Vector3]> = [];
     builtGroup.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
@@ -413,16 +498,6 @@ z_hop = ${profile.zHopMm}
       offset += 50;
     }
 
-    const blob = new Blob([buffer], { type: 'application/octet-stream' });
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
-
-    return filename;
+    return buffer;
   }
 }

@@ -1,658 +1,711 @@
 import * as THREE from 'three';
 import { SupportType } from '@/backend/domain/slicing';
 import { SampleModelId } from '@/backend/domain/sample-models';
+import { ModelBuilder } from './ModelBuilder';
 
-interface SupportBranchSpec {
-  bedX: number;
-  bedZ: number;
-  targetX: number;
-  targetY: number;
-  targetZ: number;
-  trunkRadius: number;
-  padRadius?: number;
+export interface StudioOrcaSupportRequest {
+  type: SupportType;
+  modelId: SampleModelId;
+  clipPlane?: THREE.Plane;
+  sourceGroup?: THREE.Group;
+  rootSpaceGroup?: THREE.Group;
+  orientationDeg?: number;
+  dimensionsMm?: { x: number; y: number; z: number };
+  overhangThresholdDeg?: number;
+  branchDiameterMm?: number;
+  interfaceLayers?: number;
+  onProgress?: (pct: number, label: string) => void;
+}
+
+interface StudioSupportSegment {
+  isInterface: boolean;
+  points: number[];
+}
+
+const cachedSupportGroups = new Map<string, THREE.Group>();
+const inFlightRequests = new Map<string, Promise<THREE.Group>>();
+let studioOrcaWorker: Worker | null = null;
+let studioWorkerManifestPromise: Promise<string | null> | null = null;
+let workerMsgChain: Promise<unknown> = Promise.resolve();
+let nextReqId = 1;
+
+async function resolveOrcaWorkerUrl(): Promise<string | null> {
+  if (typeof window === 'undefined') return null;
+  if (!studioWorkerManifestPromise) {
+    studioWorkerManifestPromise = fetch('/3dsim/orca-worker-manifest.json', { cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const json = (await res.json()) as { workerUrl?: string };
+        return json?.workerUrl || null;
+      })
+      .catch(() => null);
+  }
+  return studioWorkerManifestPromise;
+}
+
+async function getOrCreateStudioOrcaWorker(): Promise<Worker | null> {
+  if (studioOrcaWorker) return studioOrcaWorker;
+  const workerUrl = await resolveOrcaWorkerUrl();
+  if (!workerUrl) return null;
+  const worker = new Worker(workerUrl, { type: 'module' });
+  studioOrcaWorker = worker;
+  return worker;
+}
+
+function buildCacheKey(req: StudioOrcaSupportRequest): string {
+  const dx = Math.round(req.dimensionsMm?.x ?? 80);
+  const dy = Math.round(req.dimensionsMm?.y ?? 80);
+  const dz = Math.round(req.dimensionsMm?.z ?? 80);
+  const ang = Math.round(req.overhangThresholdDeg ?? 35);
+  const diam = (req.branchDiameterMm ?? 2.2).toFixed(1);
+  const orient = Math.round(req.orientationDeg ?? 0);
+  return `${req.type}|${req.modelId}|${dx}x${dy}x${dz}|${ang}|${diam}|${req.interfaceLayers ?? 2}|o${orient}`;
+}
+
+function applyClipPlaneToGroup(group: THREE.Group, clipPlane?: THREE.Plane): void {
+  if (!clipPlane) return;
+  group.traverse((child) => {
+    if (child instanceof THREE.Mesh && child.material) {
+      if (Array.isArray(child.material)) {
+        child.material.forEach((m) => {
+          m.clippingPlanes = [clipPlane];
+          m.clipShadows = true;
+        });
+      } else {
+        child.material.clippingPlanes = [clipPlane];
+        child.material.clipShadows = true;
+      }
+    }
+  });
+}
+
+function cloneSupportGroup(src: THREE.Group, clipPlane?: THREE.Plane): THREE.Group {
+  const cloned = new THREE.Group();
+  cloned.name = 'studio_orca_cpp_support_group';
+  src.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      const m = new THREE.Mesh(
+        child.geometry.clone(),
+        Array.isArray(child.material)
+          ? child.material.map((mat) => mat.clone())
+          : child.material.clone()
+      );
+      m.name = child.name;
+      m.castShadow = true;
+      m.receiveShadow = true;
+      cloned.add(m);
+    }
+  });
+  applyClipPlaneToGroup(cloned, clipPlane);
+  return cloned;
+}
+
+function buildMillimeterZUpStlFromGroup(
+  sourceGroup: THREE.Group,
+  targetDimsMm: { x: number; y: number; z: number },
+  rootSpaceGroup?: THREE.Group,
+  orientationDeg: number = 0
+): {
+  stlBuffer: ArrayBuffer;
+  invScaleX: number;
+  invScaleY: number;
+  invScaleZ: number;
+  minLocalY: number;
+  centerLocalX: number;
+  centerLocalZ: number;
+  mmHeight: number;
+} | null {
+  const refRoot = rootSpaceGroup || sourceGroup;
+  refRoot.updateMatrixWorld(true);
+  sourceGroup.updateMatrixWorld(true);
+  const invRefWorld = refRoot.matrixWorld.clone().invert();
+
+  const chunks: Float32Array[] = [];
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+  const vA = new THREE.Vector3();
+  const vB = new THREE.Vector3();
+  const vC = new THREE.Vector3();
+  const relMat = new THREE.Matrix4();
+
+  sourceGroup.traverse((child) => {
+    if (!(child instanceof THREE.Mesh) || !child.geometry) return;
+    if (
+      child.name.includes('support') ||
+      child.name.includes('brim') ||
+      child.name.includes('raft')
+    ) {
+      return;
+    }
+    const pos = child.geometry.getAttribute('position');
+    if (!pos || pos.count < 3) return;
+    const idx = child.geometry.getIndex();
+    const triCount = idx ? Math.floor(idx.count / 3) : Math.floor(pos.count / 3);
+    const arr = new Float32Array(triCount * 9);
+    relMat.multiplyMatrices(invRefWorld, child.matrixWorld);
+
+    let w = 0;
+    for (let t = 0; t < triCount; t++) {
+      const i0 = idx ? idx.getX(t * 3) : t * 3;
+      const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+      const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      vA.fromBufferAttribute(pos, i0).applyMatrix4(relMat);
+      vB.fromBufferAttribute(pos, i1).applyMatrix4(relMat);
+      vC.fromBufferAttribute(pos, i2).applyMatrix4(relMat);
+
+      for (const v of [vA, vB, vC]) {
+        if (v.x < minX) minX = v.x;
+        if (v.x > maxX) maxX = v.x;
+        if (v.y < minY) minY = v.y;
+        if (v.y > maxY) maxY = v.y;
+        if (v.z < minZ) minZ = v.z;
+        if (v.z > maxZ) maxZ = v.z;
+      }
+
+      arr[w++] = vA.x; arr[w++] = vA.y; arr[w++] = vA.z;
+      arr[w++] = vB.x; arr[w++] = vB.y; arr[w++] = vB.z;
+      arr[w++] = vC.x; arr[w++] = vC.y; arr[w++] = vC.z;
+    }
+    chunks.push(arr);
+  });
+
+  if (chunks.length === 0) return null;
+
+  const spanX = Math.max(1e-4, maxX - minX);
+  const spanY = Math.max(1e-4, maxY - minY);
+  const spanZ = Math.max(1e-4, maxZ - minZ);
+
+  // Use isotropic millimeter mapping because relMat already embeds modelScaleGroup non-uniform scaling.
+  // This prevents axis-skewing overhang slopes while guaranteeing pixel-exact alignment back to scene space.
+  const rad = ((orientationDeg || 0) * Math.PI) / 180;
+  const cRot = Math.abs(Math.cos(rad));
+  const sRot = Math.abs(Math.sin(rad));
+  const mmX = Math.max(1, targetDimsMm.x || 80);
+  const baseMmY = Math.max(1, targetDimsMm.z || 80);
+  const baseMmZ = Math.max(1, targetDimsMm.y || 80);
+  const rotMmY = baseMmY * cRot + baseMmZ * sRot;
+  const rotMmZ = baseMmY * sRot + baseMmZ * cRot;
+  const maxSpanScene = Math.max(spanX, spanY, spanZ);
+  const maxSpanMm = Math.max(mmX, rotMmY, rotMmZ);
+  const uniformMmPerScene = maxSpanMm / maxSpanScene;
+  const mmHeight = spanY * uniformMmPerScene;
+
+  const scaleToMmX = uniformMmPerScene;
+  const scaleToMmY = uniformMmPerScene;
+  const scaleToMmZ = uniformMmPerScene;
+
+  let totalTris = 0;
+  for (const c of chunks) totalTris += Math.floor(c.length / 9);
+
+  const buffer = new ArrayBuffer(84 + totalTris * 50);
+  const view = new DataView(buffer);
+  view.setUint32(80, totalTris, true);
+
+  let offset = 84;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i += 9) {
+      // Three.js Y-up scaled to mm -> Orca Z-up (x, -z, y - minY)
+      const ax = (c[i] - (minX + maxX) * 0.5) * scaleToMmX;
+      const ay = -((c[i + 2] - (minZ + maxZ) * 0.5) * scaleToMmZ);
+      const az = (c[i + 1] - minY) * scaleToMmY;
+
+      const bx = (c[i + 3] - (minX + maxX) * 0.5) * scaleToMmX;
+      const by = -((c[i + 5] - (minZ + maxZ) * 0.5) * scaleToMmZ);
+      const bz = (c[i + 4] - minY) * scaleToMmY;
+
+      const cx = (c[i + 6] - (minX + maxX) * 0.5) * scaleToMmX;
+      const cy = -((c[i + 8] - (minZ + maxZ) * 0.5) * scaleToMmZ);
+      const cz = (c[i + 7] - minY) * scaleToMmY;
+
+      const abx = bx - ax, aby = by - ay, abz = bz - az;
+      const acx = cx - ax, acy = cy - ay, acz = cz - az;
+      let nx = aby * acz - abz * acy;
+      let ny = abz * acx - abx * acz;
+      let nz = abx * acy - aby * acx;
+      const nLen = Math.hypot(nx, ny, nz) || 1;
+      nx /= nLen; ny /= nLen; nz /= nLen;
+
+      view.setFloat32(offset, nx, true);
+      view.setFloat32(offset + 4, ny, true);
+      view.setFloat32(offset + 8, nz, true);
+
+      view.setFloat32(offset + 12, ax, true);
+      view.setFloat32(offset + 16, ay, true);
+      view.setFloat32(offset + 20, az, true);
+
+      view.setFloat32(offset + 24, bx, true);
+      view.setFloat32(offset + 28, by, true);
+      view.setFloat32(offset + 32, bz, true);
+
+      view.setFloat32(offset + 36, cx, true);
+      view.setFloat32(offset + 40, cy, true);
+      view.setFloat32(offset + 44, cz, true);
+
+      view.setUint16(offset + 48, 0, true);
+      offset += 50;
+    }
+  }
+
+  return {
+    stlBuffer: buffer,
+    invScaleX: 1 / scaleToMmX,
+    invScaleY: 1 / scaleToMmY,
+    invScaleZ: 1 / scaleToMmZ,
+    minLocalY: minY,
+    centerLocalX: (minX + maxX) * 0.5,
+    centerLocalZ: (minZ + maxZ) * 0.5,
+    mmHeight,
+  };
+}
+
+function buildWatertightGroupFromOrcaLayers(
+  layers: Array<{ z: number; idx: number; paths: Float32Array }>,
+  type: SupportType,
+  transformInfo: {
+    invScaleX: number;
+    invScaleY: number;
+    invScaleZ: number;
+    minLocalY: number;
+    centerLocalX: number;
+    centerLocalZ: number;
+  },
+  layerHeightMm: number,
+  clipPlane?: THREE.Plane
+): THREE.Group {
+  const group = new THREE.Group();
+  group.name = 'studio_orca_cpp_support_group';
+
+  const layerCount = layers.length;
+  const supportGridPerLayer: Array<Set<number>> = new Array(layerCount);
+  const packCell = (xs: number, ys: number) =>
+    Math.round((xs + 512) * 0.5) * 2048 + Math.round((ys + 512) * 0.5);
+
+  for (let li = 0; li < layerCount; li++) {
+    const cellSet = new Set<number>();
+    const p = layers[li].paths;
+    if (p && p.length >= 8) {
+      for (let k = 0; k < p.length; k += 8) {
+        const role = (p[k + 3] | 0) & 15;
+        if (role === 5 || role === 6) {
+          cellSet.add(packCell((p[k] + p[k + 4]) * 0.5, (p[k + 1] + p[k + 5]) * 0.5));
+        }
+      }
+    }
+    supportGridPerLayer[li] = cellSet;
+  }
+
+  const hasSupportAbove = (li: number, xs: number, ys: number): boolean => {
+    const checkLayer = li + 2;
+    if (checkLayer >= layerCount) return false;
+    const aboveSet = supportGridPerLayer[checkLayer];
+    if (!aboveSet || aboveSet.size === 0) return false;
+    const gxBase = Math.round((xs + 512) * 0.5);
+    const gyBase = Math.round((ys + 512) * 0.5);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (aboveSet.has((gxBase + dx) * 2048 + (gyBase + dy))) return true;
+      }
+    }
+    return false;
+  };
+
+  const segments: StudioSupportSegment[] = [];
+  for (let li = 0; li < layerCount; li++) {
+    const p = layers[li].paths;
+    if (!p || p.length < 8) continue;
+
+    let activeLoop: number[] = [];
+    let activeIsInterface = false;
+    let prevEndX = NaN;
+    let prevEndZ = NaN;
+
+    const flushLoop = () => {
+      if (activeLoop.length >= 6) {
+        segments.push({ isInterface: activeIsInterface, points: activeLoop });
+      }
+      activeLoop = [];
+      prevEndX = NaN;
+      prevEndZ = NaN;
+    };
+
+    for (let k = 0; k < p.length; k += 8) {
+      const role = (p[k + 3] | 0) & 15;
+      if (role !== 5 && role !== 6) {
+        if (activeLoop.length > 0) flushLoop();
+        continue;
+      }
+
+      const x0 = p[k], y0 = p[k + 1], z0 = p[k + 2];
+      const x1 = p[k + 4], y1 = p[k + 5], z1 = p[k + 6];
+      const isRoof = li >= 2 && !hasSupportAbove(li, (x0 + x1) * 0.5, (y0 + y1) * 0.5);
+
+      const tx0 = x0, ty0 = z0, tz0 = -y0;
+      const tx1 = x1, ty1 = z1, tz1 = -y1;
+
+      const continuesPrev =
+        activeLoop.length >= 6 &&
+        activeIsInterface === isRoof &&
+        Math.hypot(tx0 - prevEndX, tz0 - prevEndZ) < 0.08;
+
+      if (!continuesPrev && activeLoop.length > 0) flushLoop();
+
+      activeIsInterface = isRoof;
+      activeLoop.push(tx0, ty0, tz0, tx1, ty1, tz1);
+      prevEndX = tx1;
+      prevEndZ = tz1;
+    }
+    flushLoop();
+  }
+
+  const trunkPos: number[] = [];
+  const trunkIdx: number[] = [];
+  const ifPos: number[] = [];
+  const ifIdx: number[] = [];
+
+  const pushQuad = (idxArr: number[], a: number, b: number, c: number, d: number) => {
+    idxArr.push(a, b, c, a, c, d);
+  };
+
+  const extrudeRibbon = (
+    poly: number[],
+    posArr: number[],
+    idxArr: number[],
+    w: number,
+    h: number
+  ) => {
+    let m = Math.floor(poly.length / 3);
+    if (m < 2) return;
+    const endDist = Math.hypot(
+      poly[(m - 1) * 3] - poly[0],
+      poly[(m - 1) * 3 + 2] - poly[2]
+    );
+    const isClosed = m >= 4 && endDist < 0.35;
+    if (isClosed && endDist < 0.05) m -= 1;
+    if (m < 2 || (isClosed && m < 3)) return;
+
+    const segCount = isClosed ? m : m - 1;
+    const segNx = new Float32Array(segCount);
+    const segNz = new Float32Array(segCount);
+    for (let s = 0; s < segCount; s++) {
+      const next = (s + 1) % m;
+      const dx = poly[next * 3] - poly[s * 3];
+      const dz = poly[next * 3 + 2] - poly[s * 3 + 2];
+      const len = Math.hypot(dx, dz) || 1;
+      segNx[s] = -dz / len;
+      segNz[s] = dx / len;
+    }
+
+    const startVert = posArr.length / 3;
+    const {
+      invScaleX,
+      invScaleY,
+      invScaleZ,
+      minLocalY,
+      centerLocalX,
+      centerLocalZ,
+    } = transformInfo;
+
+    for (let k = 0; k < m; k++) {
+      let nx = 0, nz = 0;
+      if (isClosed) {
+        const prevSeg = (k - 1 + segCount) % segCount;
+        nx = segNx[prevSeg] + segNx[k];
+        nz = segNz[prevSeg] + segNz[k];
+      } else if (k > 0 && k < m - 1) {
+        nx = segNx[k - 1] + segNx[k];
+        nz = segNz[k - 1] + segNz[k];
+      } else if (k === 0) {
+        nx = segNx[0]; nz = segNz[0];
+      } else {
+        nx = segNx[m - 2]; nz = segNz[m - 2];
+      }
+      const nLen = Math.hypot(nx, nz) || 1;
+      nx /= nLen; nz /= nLen;
+
+      const x = poly[k * 3];
+      const y = poly[k * 3 + 1];
+      const z = poly[k * 3 + 2];
+      const yTop = minLocalY + (y + h) * invScaleY;
+      const yBot = minLocalY + Math.max(0, y - h) * invScaleY;
+
+      posArr.push(
+        centerLocalX + (x + nx * w) * invScaleX, yTop, centerLocalZ + (z + nz * w) * invScaleZ,
+        centerLocalX + (x + nx * w) * invScaleX, yBot, centerLocalZ + (z + nz * w) * invScaleZ,
+        centerLocalX + (x - nx * w) * invScaleX, yBot, centerLocalZ + (z - nz * w) * invScaleZ,
+        centerLocalX + (x - nx * w) * invScaleX, yTop, centerLocalZ + (z - nz * w) * invScaleZ
+      );
+    }
+
+    for (let s = 0; s < segCount; s++) {
+      const next = (s + 1) % m;
+      const b0 = startVert + s * 4;
+      const b1 = startVert + next * 4;
+      pushQuad(idxArr, b0, b0 + 1, b1 + 1, b1);
+      pushQuad(idxArr, b0 + 3, b0, b1, b1 + 3);
+      pushQuad(idxArr, b0 + 2, b0 + 3, b1 + 3, b1 + 2);
+      pushQuad(idxArr, b0 + 1, b1 + 1, b1 + 2, b0 + 2);
+    }
+
+    if (!isClosed) {
+      const s0 = startVert;
+      const sN = startVert + (m - 1) * 4;
+      pushQuad(idxArr, s0, s0 + 3, s0 + 2, s0 + 1);
+      pushQuad(idxArr, sN, sN + 1, sN + 2, sN + 3);
+    }
+  };
+
+  const halfW = 0.21;
+  const halfH = Math.max(0.08, layerHeightMm * 0.56);
+
+  for (const seg of segments) {
+    const pts = seg.points;
+    let curPoly: number[] = [];
+    const flushPoly = () => {
+      if (curPoly.length >= 6) {
+        if (seg.isInterface) extrudeRibbon(curPoly, ifPos, ifIdx, halfW * 0.96, halfH * 0.94);
+        else extrudeRibbon(curPoly, trunkPos, trunkIdx, halfW, halfH);
+      }
+      curPoly = [];
+    };
+
+    for (let i = 0; i < pts.length - 5; i += 6) {
+      const x1 = pts[i], y1 = pts[i + 1], z1 = pts[i + 2];
+      const x2 = pts[i + 3], y2 = pts[i + 4], z2 = pts[i + 5];
+      if (curPoly.length === 0) {
+        curPoly.push(x1, y1, z1, x2, y2, z2);
+      } else {
+        const lx = curPoly[curPoly.length - 3];
+        const ly = curPoly[curPoly.length - 2];
+        const lz = curPoly[curPoly.length - 1];
+        if (Math.hypot(x1 - lx, y1 - ly, z1 - lz) < 0.15) {
+          curPoly.push(x2, y2, z2);
+        } else {
+          flushPoly();
+          curPoly.push(x1, y1, z1, x2, y2, z2);
+        }
+      }
+    }
+    flushPoly();
+  }
+
+  if (trunkPos.length > 0) {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(trunkPos, 3));
+    geom.setIndex(trunkIdx);
+    geom.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: type === 'tree' ? 0x00e050 : 0x06b6d4,
+      roughness: 0.32,
+      metalness: 0.06,
+      side: THREE.FrontSide,
+    });
+    const m = new THREE.Mesh(geom, mat);
+    m.name = 'studio_orca_tree_trunk';
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+  }
+
+  if (ifPos.length > 0) {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(ifPos, 3));
+    geom.setIndex(ifIdx);
+    geom.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: type === 'tree' ? 0xd946ef : 0xa5f3fc,
+      emissive: new THREE.Color(type === 'tree' ? 0xa21caf : 0x0891b2),
+      emissiveIntensity: 0.25,
+      roughness: 0.28,
+      side: THREE.FrontSide,
+    });
+    const m = new THREE.Mesh(geom, mat);
+    m.name = 'studio_orca_tree_interface';
+    group.add(m);
+  }
+
+  applyClipPlaneToGroup(group, clipPlane);
+  return group;
 }
 
 export class SupportBuilder {
   /**
-   * Builds authentic, realistic Slicer Support Structures (Tree Support & Normal Support)
-   * Designed in local coordinate space where Y = 0 is the build plate surface.
+   * Synchronous accessor: returns cached C++ OrcaSlicer Tree Support mesh when already sliced
+   * (zero fake hardcoded tubes or spears).
    */
   static buildSupports(
     type: SupportType,
     modelId: SampleModelId,
     clipPlane?: THREE.Plane,
-    customGroup?: THREE.Group
+    _customGroup?: THREE.Group,
+    dimensionsMm?: { x: number; y: number; z: number }
   ): THREE.Group {
-    const group = new THREE.Group();
-    if (type === 'none') return group;
-
-    // A. Main Slicer Trunk Material (Translucent emerald green for tree, cyan for normal)
-    const trunkMat = new THREE.MeshStandardMaterial({
-      color: type === 'tree' ? 0x10b981 : 0x06b6d4, // Bambu Studio Tree Green vs Normal Cyan
-      roughness: 0.35,
-      metalness: 0.08,
-      transparent: true,
-      opacity: 0.85,
-      clippingPlanes: clipPlane ? [clipPlane] : [],
-      clipShadows: true,
-      side: THREE.DoubleSide,
-    });
-
-    // B. Support Interface Material (Lighter mint/ice color where support contacts model)
-    const interfaceMat = new THREE.MeshStandardMaterial({
-      color: type === 'tree' ? 0x6ee7b7 : 0xa5f3fc, // Mint interface pad
-      roughness: 0.45,
-      metalness: 0.05,
-      transparent: true,
-      opacity: 0.95,
-      clippingPlanes: clipPlane ? [clipPlane] : [],
-      clipShadows: true,
-      side: THREE.DoubleSide,
-    });
-
-    // C. Bed Brim Material (Darker green adhesion disc on bed)
-    const brimMat = new THREE.MeshStandardMaterial({
-      color: type === 'tree' ? 0x047857 : 0x0891b2,
-      roughness: 0.6,
-      transparent: true,
-      opacity: 0.9,
-      clippingPlanes: clipPlane ? [clipPlane] : [],
-    });
-
-    if (type === 'tree') {
-      return this.buildRealisticTreeSupport(modelId, trunkMat, interfaceMat, brimMat, customGroup);
-    } else {
-      return this.buildRealisticNormalSupport(modelId, trunkMat, interfaceMat, brimMat, customGroup);
+    if (type === 'none') return new THREE.Group();
+    const exactKey = buildCacheKey({ type, modelId, dimensionsMm });
+    const cachedExact = cachedSupportGroups.get(exactKey);
+    if (cachedExact) {
+      return cloneSupportGroup(cachedExact, clipPlane);
     }
+
+    // Also search any recent cached C++ slice matching type + modelId when called synchronously
+    for (const [key, grp] of cachedSupportGroups.entries()) {
+      if (key.startsWith(`${type}|${modelId}|`)) {
+        return cloneSupportGroup(grp, clipPlane);
+      }
+    }
+    return new THREE.Group();
   }
 
   /**
-   * 1. Realistic Organic Tree Support (Bambu Studio / OrcaSlicer Style)
-   * Hugs the exact underside overhangs from the build plate (Y=0) without touching print-in-place joints.
+   * Executes the authentic C++ OrcaSlicer WASM Tree Support engine (shared worker from /3dsim)
+   * directly on any `/studio` model or custom STL mesh.
    */
-  private static buildRealisticTreeSupport(
-    modelId: SampleModelId,
-    trunkMat: THREE.Material,
-    interfaceMat: THREE.Material,
-    brimMat: THREE.Material,
-    customGroup?: THREE.Group
-  ): THREE.Group {
-    const group = new THREE.Group();
-    const branches = this.getBranchSpecs(modelId, customGroup);
+  static async buildSupportsAsync(req: StudioOrcaSupportRequest): Promise<THREE.Group> {
+    if (req.type === 'none' || typeof window === 'undefined') {
+      return new THREE.Group();
+    }
 
-    branches.forEach((b) => {
-      // 1. Bed Brim Disc (Đế bám bàn in rộng chống bong mép - Brim 5mm)
-      const brimRadius = b.trunkRadius * 3.0;
-      const brimGeo = new THREE.CylinderGeometry(brimRadius, brimRadius * 1.1, 0.02, 24);
-      const brim = new THREE.Mesh(brimGeo, brimMat);
-      brim.position.set(b.bedX, 0.01, b.bedZ);
-      group.add(brim);
+    const cacheKey = buildCacheKey(req);
+    const cached = cachedSupportGroups.get(cacheKey);
+    if (cached) {
+      return cloneSupportGroup(cached, req.clipPlane);
+    }
 
-      // 2. Flared Trunk Foot (Chân trụ mở rộng)
-      const footGeo = new THREE.CylinderGeometry(b.trunkRadius * 1.3, brimRadius * 0.8, 0.06, 24);
-      const foot = new THREE.Mesh(footGeo, trunkMat);
-      foot.position.set(b.bedX, 0.04, b.bedZ);
-      group.add(foot);
+    const existingPromise = inFlightRequests.get(cacheKey);
+    if (existingPromise) {
+      const grp = await existingPromise;
+      return cloneSupportGroup(grp, req.clipPlane);
+    }
 
-      // 3. Smooth Organic Curving Trunk (Thân cây hữu cơ uốn lượn tự nhiên)
-      const p0 = new THREE.Vector3(b.bedX, 0.06, b.bedZ);
-      const p1 = new THREE.Vector3(
-        b.bedX * 0.8 + b.targetX * 0.2,
-        b.targetY * 0.25,
-        b.bedZ * 0.8 + b.targetZ * 0.2
-      );
-      const p2 = new THREE.Vector3(
-        b.bedX * 0.45 + b.targetX * 0.55,
-        b.targetY * 0.6,
-        b.bedZ * 0.45 + b.targetZ * 0.55
-      );
-      const p3 = new THREE.Vector3(
-        b.bedX * 0.15 + b.targetX * 0.85,
-        b.targetY * 0.88,
-        b.bedZ * 0.15 + b.targetZ * 0.85
-      );
-      const p4 = new THREE.Vector3(b.targetX, b.targetY - 0.02, b.targetZ);
+    const runPromise: Promise<THREE.Group> = workerMsgChain
+      .then(async (): Promise<THREE.Group> => {
+        const worker = await getOrCreateStudioOrcaWorker();
+        if (!worker) return new THREE.Group();
 
-      const curve = new THREE.CatmullRomCurve3([p0, p1, p2, p3, p4]);
-      const tubeGeo = new THREE.TubeGeometry(curve, 32, b.trunkRadius, 14, false);
-      const tube = new THREE.Mesh(tubeGeo, trunkMat);
-      tube.castShadow = true;
-      tube.receiveShadow = true;
-      group.add(tube);
-
-      // 4. Support Interface Contact Pad (Đệm tiếp xúc phẳng màu xanh sáng ôm sát đáy chi tiết)
-      const padR = b.padRadius || b.trunkRadius * 1.8;
-      const padGeo = new THREE.CylinderGeometry(padR, padR * 0.85, 0.03, 20);
-      const pad = new THREE.Mesh(padGeo, interfaceMat);
-      pad.position.set(b.targetX, b.targetY - 0.015, b.targetZ);
-      group.add(pad);
-
-      // 5. Bifurcated Organic Secondary Twigs (Chạc cây phân nhánh chữ Y đỡ vùng lân cận)
-      if (b.targetY > 0.36) {
-        const splitPt = curve.getPoint(0.56);
-        const jointGeo = new THREE.SphereGeometry(b.trunkRadius * 1.08, 12, 10);
-        const joint = new THREE.Mesh(jointGeo, trunkMat);
-        joint.position.copy(splitPt);
-        group.add(joint);
-
-        const rdx = b.targetX - b.bedX;
-        const rdz = b.targetZ - b.bedZ;
-        const rLen = Math.hypot(rdx, rdz) || 1;
-        const tanX = -rdz / rLen;
-        const tanZ = rdx / rLen;
-        const spread = Math.max(0.12, Math.min(0.24, b.targetY * 0.16));
-
-        for (const side of [-1, 1]) {
-          const subTargetX = b.targetX + tanX * spread * side;
-          const subTargetZ = b.targetZ + tanZ * spread * side;
-          const subTargetY = Math.max(0.22, b.targetY - 0.025);
-
-          const midSub = new THREE.Vector3(
-            splitPt.x * 0.45 + subTargetX * 0.55,
-            splitPt.y + (subTargetY - splitPt.y) * 0.55,
-            splitPt.z * 0.45 + subTargetZ * 0.55
-          );
-          const subEnd = new THREE.Vector3(subTargetX, subTargetY - 0.015, subTargetZ);
-          const subCurve = new THREE.CatmullRomCurve3([splitPt.clone(), midSub, subEnd]);
-          const subTubeGeo = new THREE.TubeGeometry(subCurve, 18, b.trunkRadius * 0.68, 10, false);
-          const subTube = new THREE.Mesh(subTubeGeo, trunkMat);
-          subTube.castShadow = true;
-          group.add(subTube);
-
-          const subPadGeo = new THREE.CylinderGeometry(padR * 0.72, padR * 0.6, 0.025, 16);
-          const subPad = new THREE.Mesh(subPadGeo, interfaceMat);
-          subPad.position.set(subTargetX, subTargetY - 0.01, subTargetZ);
-          group.add(subPad);
+        let sourceGroup = req.sourceGroup;
+        if (!sourceGroup) {
+          sourceGroup = ModelBuilder.buildModel(
+            req.modelId,
+            new THREE.MeshBasicMaterial()
+          ).group;
         }
-      }
-    });
 
-    return group;
-  }
+        const targetDims = req.dimensionsMm || { x: 80, y: 80, z: 80 };
+        const stlData = buildMillimeterZUpStlFromGroup(
+          sourceGroup,
+          targetDims,
+          req.rootSpaceGroup,
+          req.orientationDeg ?? 0
+        );
+        if (!stlData) return new THREE.Group();
 
-  /**
-   * 2. Realistic Normal Support (Grid/Pillar Column with Interface Roof)
-   */
-  private static buildRealisticNormalSupport(
-    modelId: SampleModelId,
-    trunkMat: THREE.Material,
-    interfaceMat: THREE.Material,
-    brimMat: THREE.Material,
-    customGroup?: THREE.Group
-  ): THREE.Group {
-    const group = new THREE.Group();
-    const branches = this.getBranchSpecs(modelId, customGroup);
+      const layerHeightMm = 0.2;
+      const kernelParams = {
+        auto_center: false,
+        layer_height: layerHeightMm,
+        first_layer_height: 0.2,
+        line_width: 0.42,
+        nozzle_diameter: 0.4,
+        wall_loops: 2,
+        infill_density: 0.15,
+        enable_support: true,
+        support_auto: true,
+        support_style: req.type === 'tree' ? 'tree' : 'grid',
+        tree_style: 'organic',
+        independent_support_layer_height: false,
+        support_threshold_angle: Math.max(15, Math.min(60, req.overhangThresholdDeg ?? 32)),
+        support_top_z_distance: 0.2,
+        support_bottom_z_distance: 0.2,
+        support_xy_distance: 0.35,
+        support_interface_top_layers: req.interfaceLayers ?? 2,
+        support_on_build_plate_only: true,
+        tree_support_branch_diameter: req.branchDiameterMm ?? 2.2,
+        tree_support_branch_diameter_organic: req.branchDiameterMm ?? 2.2,
+        tree_support_tip_diameter: 0.8,
+        tree_support_branch_angle: 40,
+        tree_support_branch_angle_organic: 40,
+        tree_support_branch_distance_organic: stlData.mmHeight > 90 ? 3.2 : 2.2,
+        tree_support_wall_count: 1,
+        keep_stages: false,
+        gcode_role_tags: false,
+        gcode_stats_block: false,
+      };
 
-    branches.forEach((b) => {
-      const colWidth = b.trunkRadius * 2.2;
-      const height = Math.max(0.1, b.targetY - 0.03);
+      const requestId = nextReqId++;
+      const layers: Array<{ z: number; idx: number; paths: Float32Array }> = [];
 
-      // Bed Brim Base
-      const baseGeo = new THREE.BoxGeometry(colWidth * 2.0, 0.02, colWidth * 2.0);
-      const base = new THREE.Mesh(baseGeo, brimMat);
-      base.position.set(b.targetX, 0.01, b.targetZ);
-      group.add(base);
-
-      // Main Vertical Column
-      const colGeo = new THREE.BoxGeometry(colWidth, height, colWidth);
-      const col = new THREE.Mesh(colGeo, trunkMat);
-      col.position.set(b.targetX, height / 2 + 0.02, b.targetZ);
-      group.add(col);
-
-      // Horizontal Reinforcement Ribs (Accordion pattern)
-      const ribCount = Math.floor(height / 0.25);
-      for (let i = 1; i <= ribCount; i++) {
-        const ribGeo = new THREE.BoxGeometry(colWidth * 1.35, 0.02, colWidth * 1.35);
-        const rib = new THREE.Mesh(ribGeo, trunkMat);
-        rib.position.set(b.targetX, i * 0.25, b.targetZ);
-        group.add(rib);
-      }
-
-      // Top Interface Pad
-      const padGeo = new THREE.BoxGeometry(colWidth * 1.6, 0.03, colWidth * 1.6);
-      const pad = new THREE.Mesh(padGeo, interfaceMat);
-      pad.position.set(b.targetX, b.targetY - 0.015, b.targetZ);
-      group.add(pad);
-    });
-
-    return group;
-  }
-
-  /**
-   * Quét hình học 3D thực tế của mô hình tải lên (custom .3MF / .STL / .OBJ) để sinh các nhánh
-   * Organic Tree Support ôm sát đúng vùng Overhang và biên dạng của mô hình.
-   */
-  private static extractCustomGroupBranchSpecs(customGroup?: THREE.Group): SupportBranchSpec[] {
-    if (customGroup) {
-      customGroup.updateMatrixWorld(true);
-      const box = new THREE.Box3().setFromObject(customGroup);
-      const size = new THREE.Vector3();
-      box.getSize(size);
-      const center = new THREE.Vector3();
-      box.getCenter(center);
-
-      const minY = isFinite(box.min.y) ? box.min.y : 0;
-      const height = Math.max(0.4, isFinite(size.y) && size.y > 0.05 ? size.y : 1.4);
-      const halfX = Math.max(0.35, isFinite(size.x) && size.x > 0.05 ? size.x * 0.5 : 0.75);
-      const halfZ = Math.max(0.35, isFinite(size.z) && size.z > 0.05 ? size.z * 0.5 : 0.75);
-
-      const sectors = 10;
-      const bestTargets: Array<{ x: number; y: number; z: number; score: number } | null> =
-        new Array(sectors).fill(null);
-      const sectorHullRadius = new Float32Array(sectors);
-
-      const pA = new THREE.Vector3();
-      const pB = new THREE.Vector3();
-      const pC = new THREE.Vector3();
-      const e1 = new THREE.Vector3();
-      const e2 = new THREE.Vector3();
-      const norm = new THREE.Vector3();
-
-      customGroup.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          const mesh = child as THREE.Mesh;
-          const geom = mesh.geometry;
-          if (!geom || !geom.attributes.position) return;
-          const pos = geom.attributes.position;
-          const idx = geom.index;
-          const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
-          const stride = Math.max(1, Math.floor(triCount / 8000));
-          const mat = mesh.matrixWorld;
-
-          for (let t = 0; t < triCount; t += stride) {
-            const i0 = idx ? idx.getX(t * 3) : t * 3;
-            const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
-            const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
-
-            pA.fromBufferAttribute(pos, i0).applyMatrix4(mat);
-            pB.fromBufferAttribute(pos, i1).applyMatrix4(mat);
-            pC.fromBufferAttribute(pos, i2).applyMatrix4(mat);
-
-            e1.subVectors(pB, pA);
-            e2.subVectors(pC, pA);
-            norm.crossVectors(e1, e2);
-            const len = norm.length();
-            if (len < 1e-6) continue;
-            norm.divideScalar(len);
-
-            const mx = (pA.x + pB.x + pC.x) / 3;
-            const my = (pA.y + pB.y + pC.y) / 3 - minY;
-            const mz = (pA.z + pB.z + pC.z) / 3;
-
-            const dx = mx - center.x;
-            const dz = mz - center.z;
-            const distR = Math.hypot(dx, dz);
-            if (distR < 0.06) continue;
-
-            let sIdx = Math.floor(((Math.atan2(dz, dx) + Math.PI) / (Math.PI * 2)) * sectors);
-            sIdx = Math.max(0, Math.min(sectors - 1, sIdx));
-
-            if (distR > sectorHullRadius[sIdx]) {
-              sectorHullRadius[sIdx] = distR;
-            }
-
-            if (my < height * 0.14 || my > height * 0.9) continue;
-            if (norm.y > 0.25) continue;
-
-            const overhangBonus = norm.y < -0.25 ? (-norm.y) * 3.2 : 0.4;
-            const score = overhangBonus + distR * 0.85;
-            const cur = bestTargets[sIdx];
-            if (!cur || score > cur.score) {
-              bestTargets[sIdx] = { x: mx, y: my, z: mz, score };
-            }
+      await new Promise<void>((resolve, reject) => {
+        const onMsg = (ev: MessageEvent) => {
+          const data = ev.data;
+          if (!data || data.requestId !== requestId) return;
+          if (data.type === 'progress') {
+            req.onProgress?.(
+              Math.round((Number(data.done || 0) / Math.max(1, Number(data.total || 1))) * 100),
+              'OrcaSlicer C++ Tree Support...'
+            );
+            return;
           }
-        }
+          if (data.type === 'layer') {
+            layers.push({
+              z: Number(data.z || 0),
+              idx: Number(data.idx || 0),
+              paths: data.paths instanceof Float32Array ? data.paths : new Float32Array(0),
+            });
+            return;
+          }
+          if (data.type === 'error') {
+            worker.removeEventListener('message', onMsg);
+            reject(new Error(String(data.error || 'Orca C++ Studio slice failed')));
+            return;
+          }
+          if (data.type === 'done') {
+            worker.removeEventListener('message', onMsg);
+            if (layers.length === 0 && Array.isArray(data.result?.layers)) {
+              for (const L of data.result.layers) {
+                layers.push({
+                  z: Number(L.z || 0),
+                  idx: Number(L.idx || 0),
+                  paths: L.paths instanceof Float32Array ? L.paths : new Float32Array(0),
+                });
+              }
+            }
+            resolve();
+          }
+        };
+        worker.addEventListener('message', onMsg);
+        const stlCopy = stlData.stlBuffer.slice(0);
+        worker.postMessage(
+          {
+            stl: stlCopy,
+            params: JSON.stringify(kernelParams),
+            gpu: false,
+            requestId,
+          },
+          [stlCopy]
+        );
       });
 
-      const foundSpecs: SupportBranchSpec[] = [];
-      for (let s = 0; s < sectors; s++) {
-        const tgt = bestTargets[s];
-        if (!tgt) continue;
-        const dx = tgt.x - center.x;
-        const dz = tgt.z - center.z;
-        const dist = Math.hypot(dx, dz) || 1;
-        const nx = dx / dist;
-        const nz = dz / dist;
-        const bedOffset = Math.max(0.24, Math.min(0.45, tgt.y * 0.34));
-        const safeBedR = Math.max(dist + bedOffset, sectorHullRadius[s] + 0.18);
-        foundSpecs.push({
-          bedX: center.x + nx * safeBedR,
-          bedZ: center.z + nz * safeBedR,
-          targetX: tgt.x,
-          targetY: Math.max(0.22, tgt.y),
-          targetZ: tgt.z,
-          trunkRadius: 0.068,
-          padRadius: 0.135,
-        });
-      }
+      const built = buildWatertightGroupFromOrcaLayers(
+        layers,
+        req.type,
+        stlData,
+        layerHeightMm
+      );
+      cachedSupportGroups.set(cacheKey, built);
+      return built;
+    })
+      .catch((err) => {
+        console.warn('[Studio SupportBuilder] C++ Tree Support unavailable:', err);
+        return new THREE.Group();
+      });
 
-      if (foundSpecs.length >= 4) {
-        return foundSpecs;
-      }
-
-      // Fallback theo đúng kích thước Bounding Box của customGroup
-      const targetH = Math.max(0.32, height * 0.52);
-      return [
-        { bedX: 0, bedZ: halfZ + 0.28, targetX: 0, targetY: targetH, targetZ: halfZ * 0.88, trunkRadius: 0.068, padRadius: 0.135 },
-        { bedX: 0, bedZ: -(halfZ + 0.28), targetX: 0, targetY: targetH, targetZ: -halfZ * 0.88, trunkRadius: 0.068, padRadius: 0.135 },
-        { bedX: halfX + 0.28, bedZ: 0, targetX: halfX * 0.88, targetY: targetH, targetZ: 0, trunkRadius: 0.068, padRadius: 0.135 },
-        { bedX: -(halfX + 0.28), bedZ: 0, targetX: -halfX * 0.88, targetY: targetH, targetZ: 0, trunkRadius: 0.068, padRadius: 0.135 },
-        { bedX: halfX * 0.85, bedZ: halfZ * 0.85, targetX: halfX * 0.65, targetY: targetH * 1.15, targetZ: halfZ * 0.65, trunkRadius: 0.062, padRadius: 0.125 },
-        { bedX: -halfX * 0.85, bedZ: -halfZ * 0.85, targetX: -halfX * 0.65, targetY: targetH * 1.15, targetZ: -halfZ * 0.65, trunkRadius: 0.062, padRadius: 0.125 },
-      ];
-    }
-
-    return [
-      { bedX: 0, bedZ: 0.92, targetX: 0, targetY: 0.58, targetZ: 0.68, trunkRadius: 0.068, padRadius: 0.135 },
-      { bedX: 0, bedZ: -0.92, targetX: 0, targetY: 0.58, targetZ: -0.68, trunkRadius: 0.068, padRadius: 0.135 },
-      { bedX: 0.92, bedZ: 0, targetX: 0.68, targetY: 0.58, targetZ: 0, trunkRadius: 0.068, padRadius: 0.135 },
-      { bedX: -0.92, bedZ: 0, targetX: -0.68, targetY: 0.58, targetZ: 0, trunkRadius: 0.068, padRadius: 0.135 },
-    ];
-  }
-
-  /**
-   * Precise overhang specifications calculated from 3D model geometry coordinates
-   */
-  private static getBranchSpecs(modelId: SampleModelId, customGroup?: THREE.Group): SupportBranchSpec[] {
-    if (customGroup || modelId === 'custom') {
-      return this.extractCustomGroupBranchSpecs(customGroup);
-    }
-    switch (modelId) {
-      case 'dragon':
-        // Crystal Dragon: Tree supports sprout outside the model and gently curve in
-        // to touch the chin & horn tips from below.
-        // Body joints remain 100% UNTOUCHED to protect print-in-place articulation!
-        return [
-          // 1. Chin Support (Mọc phía trước mõm bàn in, vươn cong đỡ chính xác mặt dưới hàm rồng)
-          {
-            bedX: 0,
-            bedZ: 2.08,
-            targetX: 0,
-            targetY: 0.40,
-            targetZ: 1.80,
-            trunkRadius: 0.075,
-            padRadius: 0.15,
-          },
-          // 2. Horn Left (Mọc từ bàn in bên sườn trái, vươn lên đỡ góc nhọn sừng rồng)
-          {
-            bedX: -0.72,
-            bedZ: 0.88,
-            targetX: -0.40,
-            targetY: 0.90,
-            targetZ: 0.86,
-            trunkRadius: 0.065,
-            padRadius: 0.13,
-          },
-          // 3. Horn Right (Mọc từ bàn in bên sườn phải, vươn lên đỡ góc nhọn sừng phải)
-          {
-            bedX: 0.72,
-            bedZ: 0.88,
-            targetX: 0.40,
-            targetY: 0.90,
-            targetZ: 0.86,
-            trunkRadius: 0.065,
-            padRadius: 0.13,
-          },
-        ];
-
-      case 'benchy':
-        // 3DBenchy: Support only genuine overhangs (Hawsepipe bow & cabin arches)
-        return [
-          // 1. Hawsepipe (Lỗ xỏ neo mũi thuyền nhô ra phía trước)
-          {
-            bedX: 0,
-            bedZ: 1.68,
-            targetX: 0,
-            targetY: 0.46,
-            targetZ: 1.44,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 2. Vòm cửa cabin mạn trái
-          {
-            bedX: -0.66,
-            bedZ: -0.10,
-            targetX: -0.38,
-            targetY: 1.35,
-            targetZ: -0.10,
-            trunkRadius: 0.075,
-            padRadius: 0.14,
-          },
-          // 3. Vòm cửa cabin mạn phải
-          {
-            bedX: 0.66,
-            bedZ: -0.10,
-            targetX: 0.38,
-            targetY: 1.35,
-            targetZ: -0.10,
-            trunkRadius: 0.075,
-            padRadius: 0.14,
-          },
-          // 4. Vòm cửa sổ sau đuôi cabin
-          {
-            bedX: 0,
-            bedZ: -0.90,
-            targetX: 0,
-            targetY: 1.15,
-            targetZ: -0.58,
-            trunkRadius: 0.07,
-            padRadius: 0.13,
-          },
-          // 5. Mép trên cửa sổ cabin phía trước
-          {
-            bedX: 0,
-            bedZ: 0.65,
-            targetX: 0,
-            targetY: 1.38,
-            targetZ: 0.36,
-            trunkRadius: 0.065,
-            padRadius: 0.12,
-          },
-        ];
-
-      case 'robot':
-        // Retro Bot: Support under elbows and visor/chin
-        return [
-          // 1. Cùi chỏ tay trái
-          {
-            bedX: -0.92,
-            bedZ: 0,
-            targetX: -0.68,
-            targetY: 0.38,
-            targetZ: 0,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 2. Cùi chỏ tay phải
-          {
-            bedX: 0.92,
-            bedZ: 0,
-            targetX: 0.68,
-            targetY: 0.38,
-            targetZ: 0,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 3. Cằm ngực & màn hình kính mắt
-          {
-            bedX: 0,
-            bedZ: 0.82,
-            targetX: 0,
-            targetY: 1.34,
-            targetZ: 0.36,
-            trunkRadius: 0.08,
-            padRadius: 0.16,
-          },
-        ];
-
-      case 'helmet':
-        // Cyberpunk Mecha Helmet: Dedicated tree supports around visor, chin beak and ear comms
-        return [
-          // 1. Chin Beak / Respirator Filter (Vòm cằm lọc thở góc cạnh)
-          {
-            bedX: 0,
-            bedZ: 1.35,
-            targetX: 0,
-            targetY: 0.55,
-            targetZ: 1.10,
-            trunkRadius: 0.08,
-            padRadius: 0.17,
-          },
-          // 2. Left Cheek Armor Overhang (Mặt dưới ốp má trái)
-          {
-            bedX: -1.15,
-            bedZ: 0.55,
-            targetX: -0.85,
-            targetY: 0.70,
-            targetZ: 0.50,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 3. Right Cheek Armor Overhang (Mặt dưới ốp má phải)
-          {
-            bedX: 1.15,
-            bedZ: 0.55,
-            targetX: 0.85,
-            targetY: 0.70,
-            targetZ: 0.50,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 4. Left Ear Comm Puck (Cụm tai nghe bên trái)
-          {
-            bedX: -1.45,
-            bedZ: 0,
-            targetX: -1.12,
-            targetY: 1.10,
-            targetZ: 0,
-            trunkRadius: 0.075,
-            padRadius: 0.15,
-          },
-          // 5. Right Ear Comm Puck (Cụm tai nghe bên phải)
-          {
-            bedX: 1.45,
-            bedZ: 0,
-            targetX: 1.12,
-            targetY: 1.10,
-            targetZ: 0,
-            trunkRadius: 0.075,
-            padRadius: 0.15,
-          },
-          // 6. Rear Neck Flange (Vành cổ nón sau gáy)
-          {
-            bedX: 0,
-            bedZ: -1.25,
-            targetX: 0,
-            targetY: 0.38,
-            targetZ: -0.95,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-        ];
-
-      case 'turbine':
-        // Jet Engine Turbofan: Dedicated support for cylindrical nacelle lip & bellies
-        return [
-          // 1. Front Nacelle Intake Lower Lip (Mép dưới miệng hút gió trước)
-          {
-            bedX: 0,
-            bedZ: 1.05,
-            targetX: 0,
-            targetY: 0.65,
-            targetZ: 0.68,
-            trunkRadius: 0.08,
-            padRadius: 0.18,
-          },
-          // 2. Left Nacelle Belly Flange (Bụng vỏ động cơ mạn trái)
-          {
-            bedX: -1.15,
-            bedZ: 0,
-            targetX: -0.85,
-            targetY: 0.75,
-            targetZ: 0,
-            trunkRadius: 0.075,
-            padRadius: 0.16,
-          },
-          // 3. Right Nacelle Belly Flange (Bụng vỏ động cơ mạn phải)
-          {
-            bedX: 1.15,
-            bedZ: 0,
-            targetX: 0.85,
-            targetY: 0.75,
-            targetZ: 0,
-            trunkRadius: 0.075,
-            padRadius: 0.16,
-          },
-          // 4. Rear Exhaust Lip (Mép dưới miệng xả phản lực sau)
-          {
-            bedX: 0,
-            bedZ: -1.05,
-            targetX: 0,
-            targetY: 0.65,
-            targetZ: -0.68,
-            trunkRadius: 0.08,
-            padRadius: 0.18,
-          },
-        ];
-
-      case 'eiffel':
-        // Paris Eiffel Tower: Tree support under the central 1st floor grand archway
-        return [
-          // 1. Center Grand Arch Ceiling (Mặt trần vòm trung tâm tầng 1)
-          {
-            bedX: 0,
-            bedZ: 0,
-            targetX: 0,
-            targetY: 0.92,
-            targetZ: 0,
-            trunkRadius: 0.09,
-            padRadius: 0.22,
-          },
-          // 2. Front Arch Apex (Đỉnh vòm mặt trước)
-          {
-            bedX: 0,
-            bedZ: 0.75,
-            targetX: 0,
-            targetY: 0.86,
-            targetZ: 0.58,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 3. Rear Arch Apex (Đỉnh vòm mặt sau)
-          {
-            bedX: 0,
-            bedZ: -0.75,
-            targetX: 0,
-            targetY: 0.86,
-            targetZ: -0.58,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 4. Left Arch Apex (Đỉnh vòm bên trái)
-          {
-            bedX: -0.75,
-            bedZ: 0,
-            targetX: -0.58,
-            targetY: 0.86,
-            targetZ: 0,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-          // 5. Right Arch Apex (Đỉnh vòm bên phải)
-          {
-            bedX: 0.75,
-            bedZ: 0,
-            targetX: 0.58,
-            targetY: 0.86,
-            targetZ: 0,
-            trunkRadius: 0.07,
-            padRadius: 0.14,
-          },
-        ];
-
-      case 'gear':
-      default:
-        return this.extractCustomGroupBranchSpecs(customGroup);
+    workerMsgChain = runPromise;
+    inFlightRequests.set(cacheKey, runPromise);
+    try {
+      const built = await runPromise;
+      return cloneSupportGroup(built, req.clipPlane);
+    } finally {
+      inFlightRequests.delete(cacheKey);
     }
   }
 }

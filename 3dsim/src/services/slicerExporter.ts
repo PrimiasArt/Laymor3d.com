@@ -3,10 +3,11 @@ import { zipSync, strToU8 } from 'three/examples/jsm/libs/fflate.module.js';
 import { ISimulationProfile, IModelTransform } from '@/types/simulator';
 import { ISlicingMetrics } from './slicingEngine';
 import { applyTransformToGeometry, IBambuPartGeometryRecord } from './sampleModels';
-import { generateBambuSupportStructures } from './supportGenerator';
+import { buildNativeSupportMesh } from './nativeSupportLoader';
 import {
   getLatestOrcaExportSupportGeometry,
   getLatestOrcaGcode,
+  sliceGeometryWithOrcaWasm,
 } from './orcaWasmSlicerService';
 
 /**
@@ -60,18 +61,17 @@ function prepareNormalizedExportGeometry(
 }
 
 /**
- * Xây dựng lưới 3D Tree/Normal Support độc lập (đã khử va chạm SDF + Backtrack Pruning)
- * khi người dùng chọn xuất kèm Tree Support.
+ * Builds clean 3D Support mesh generated directly by the C++ OrcaSlicer WASM kernel
+ * (zero legacy synthetic fallback spears that pierce meshes).
  */
 export function buildExportSupportGeometry(
-  normalizedModelGeom: THREE.BufferGeometry,
+  _normalizedModelGeom: THREE.BufferGeometry,
   profile: ISimulationProfile
 ): THREE.BufferGeometry | null {
   if (!profile || profile.supportMode === 'none') {
     return null;
   }
 
-  // Ưu tiên 1: Lưới 3D Tree Support sinh trực tiếp từ nhân C++ OrcaSlicer WASM (0.00mm đâm xuyên mẫu)
   const orcaExportGeom = getLatestOrcaExportSupportGeometry();
   if (orcaExportGeom && (orcaExportGeom.getAttribute('position')?.count ?? 0) >= 3) {
     const clonedOrca = orcaExportGeom.clone();
@@ -83,45 +83,30 @@ export function buildExportSupportGeometry(
     return clonedOrca;
   }
 
-  const supportGroup = generateBambuSupportStructures(normalizedModelGeom, profile);
-  const candidateGeoms: THREE.BufferGeometry[] = [];
-  supportGroup.traverse((child) => {
-    if (child instanceof THREE.Mesh && child.geometry) {
-      candidateGeoms.push(child.geometry);
-    }
+  return null;
+}
+
+/**
+ * On-demand C++ Tree Support preparation if export is triggered before the auto-slice finishes.
+ */
+export async function ensureOrcaExportSupportGeometryAsync(
+  geometry: THREE.BufferGeometry,
+  profile: ISimulationProfile,
+  transform?: IModelTransform
+): Promise<THREE.BufferGeometry | null> {
+  if (!profile || profile.supportMode === 'none') return null;
+  const cached = buildExportSupportGeometry(geometry, profile);
+  if (cached) return cached;
+
+  const prepGeom = prepareNormalizedExportGeometry(geometry, transform);
+  const bundle = await sliceGeometryWithOrcaWasm(prepGeom, 'Export_Model', profile, {
+    buildSupportExportMesh: buildNativeSupportMesh,
   });
-
-  const chunks: Float32Array[] = [];
-  let totalFloats = 0;
-
-  for (const g of candidateGeoms) {
-    const nonIdx = g.index ? g.toNonIndexed() : g;
-    const pos = nonIdx.getAttribute('position');
-    if (pos && pos.count >= 3) {
-      const arr = new Float32Array(pos.count * 3);
-      for (let i = 0; i < pos.count; i++) {
-        arr[i * 3] = pos.getX(i);
-        arr[i * 3 + 1] = pos.getY(i);
-        arr[i * 3 + 2] = pos.getZ(i);
-      }
-      chunks.push(arr);
-      totalFloats += arr.length;
-    }
+  prepGeom.dispose();
+  if (bundle?.supportExportGeometry) {
+    return bundle.supportExportGeometry.clone();
   }
-
-  if (totalFloats === 0) return null;
-
-  const merged = new Float32Array(totalFloats);
-  let offset = 0;
-  for (const c of chunks) {
-    merged.set(c, offset);
-    offset += c.length;
-  }
-
-  const outGeom = new THREE.BufferGeometry();
-  outGeom.setAttribute('position', new THREE.BufferAttribute(merged, 3));
-  outGeom.computeVertexNormals();
-  return outGeom;
+  return buildExportSupportGeometry(geometry, profile);
 }
 
 /**
@@ -205,13 +190,29 @@ export function generateBambuOrcaProfileJson(
 
     // 4. Support & Bed Adhesion
     enable_support: profile.supportMode !== 'none' ? '1' : '0',
-    support_type: profile.supportMode === 'tree' ? 'tree(auto)' : 'normal(auto)',
-    support_style: profile.supportMode === 'tree' ? `tree_${profile.treeStyle || 'organic'}` : 'default',
-    support_threshold_angle: (profile.supportAngleThreshold ?? 45).toString(),
+    support_type:
+      profile.supportMode === 'tree'
+        ? profile.supportPaintMode === 'paint_only'
+          ? 'tree(manual)'
+          : 'tree(auto)'
+        : profile.supportPaintMode === 'paint_only'
+          ? 'normal(manual)'
+          : 'normal(auto)',
+    support_style:
+      profile.supportMode === 'tree'
+        ? !profile.treeStyle || profile.treeStyle === 'organic'
+          ? 'organic'
+          : `tree_${profile.treeStyle}`
+        : 'default',
+    support_threshold_angle: (profile.supportAngleThreshold ?? 30).toString(),
     support_top_z_distance: (profile.supportTopZDistance ?? 0.2).toString(),
     support_bottom_z_distance: (profile.supportBottomZDistance ?? 0.2).toString(),
+    support_object_xy_distance: (profile.supportXyDistanceMm ?? 0.35).toString(),
+    support_interface_spacing: (profile.supportInterfaceSpacingMm ?? 0.4).toString(),
     tree_support_branch_diameter: (profile.supportBranchDiameter ?? 2.2).toString(),
-    tree_support_branch_angle: (profile.supportBranchAngle ?? 45).toString(),
+    tree_support_branch_angle: (profile.supportBranchAngle ?? 42).toString(),
+    tree_support_top_rate: (profile.treeTopRatePercent ?? 30).toString(),
+    tree_support_branch_diameter_angle: (profile.treeBranchDiameterAngleDeg ?? 5).toString(),
     support_interface_top_layers: (profile.supportInterfaceLayers ?? 2).toString(),
     support_on_build_plate_only: profile.supportOnBuildPlateOnly !== false ? '1' : '0',
     brim_type: brimTypeBambu,

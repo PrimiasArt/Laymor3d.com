@@ -7,6 +7,8 @@ export type KnowledgeCategory =
   | 'vietnam_environment'       // Khí hậu Việt Nam (độ ẩm 85-95% mùa nồm, vệ sinh PEI bằng Sunlight)
   | 'commercial_practice';      // Kinh nghiệm vận hành xưởng in thương mại (tối ưu giờ máy, phế phẩm)
 
+export type KnowledgeModerationStatus = 'pending' | 'approved' | 'rejected' | 'archived';
+
 export interface ISlicerParameterOverride {
   layer_height?: number;
   initial_layer_print_height?: number;
@@ -57,7 +59,8 @@ export interface IKnowledgeEntry {
   slicerOverrides?: ISlicerParameterOverride; // Cấu hình thông số Bambu Studio / OrcaSlicer override
   triggerCondition?: ISimulatorDefectTriggerCondition; // Điều kiện để App giả lập tự động phát hiện lỗi
   autoFixPatch?: Record<string, any>;   // Bản vá tự động áp dụng lên ISimulationProfile trong /3dsim
-  submittedBy?: string;                 // ID người dùng đóng góp (VD: hlcai_admin, maker_vn...)
+  submittedByUserId?: string;           // ID tài khoản đóng góp (từ phiên SSO xác thực trên Server)
+  submittedBy?: string;                 // Tên hiển thị / username người đóng góp
   applicablePrinters: string[];         // e.g. ['all'] hoặc ['bambu-x1c-p1s', 'creality-k1']
   applicableFilaments: string[];        // e.g. ['PLA', 'PETG', 'TPU', 'ABS', 'PLA-CF', 'ASA', 'PA-CF']
   applicableCategories?: string[];
@@ -74,9 +77,14 @@ export interface IKnowledgeEntry {
     | 'cnc_kitchen';
   sourceReference?: string;
   tags: string[];
+  moderationStatus?: KnowledgeModerationStatus; // Vòng đời kiểm soát: pending -> approved / rejected / archived
+  reviewedBy?: string;                  // ID/Username Admin đã duyệt hoặc từ chối
+  reviewedAt?: string;
+  rejectionReason?: string;
+  contentHash?: string;                 // Hash chuẩn hóa chống spam & trùng lặp
   createdAt: string;
   updatedAt: string;
-  isVerified: boolean;                  // Admin phê duyệt để App giả lập kích hoạt học chính thức
+  isVerified: boolean;                  // true chỉ khi Admin đã duyệt (approved)
 }
 
 export interface IRiskWarning {

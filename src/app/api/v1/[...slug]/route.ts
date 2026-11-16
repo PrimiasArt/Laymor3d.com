@@ -4,10 +4,14 @@ import { orderRepository } from '@/backend/repositories/OrderRepository';
 import { userRepository } from '@/backend/repositories/UserRepository';
 import {
   runSelfImprovingPhysicsAudit,
-  getRuntimeLearningDataset,
-  addRuntimeLearningCase,
+  fetchLearningCasesDurableAsync,
+  recordLearningCaseDurableAsync,
+  moderateLearningCaseDurableAsync,
   IHistoricalLearningCase,
 } from '@/backend/services/slicing/SelfImprovingAiAdvisor';
+import { isModerationAdmin, resolveRequestUser } from '@/backend/services/auth/sessionGuard';
+import { isNeonConfigured } from '@/backend/services/neon/neonClient';
+import { auditLogRepository } from '@/backend/repositories/AuditLogRepository';
 import {
   googleDriveSheetsBridge,
   GoogleDriveSheetsBridge,
@@ -133,16 +137,24 @@ export async function GET(
   }
 
   if (pathKey === 'storage/status') {
+    const { cases, persistedBackend } = await fetchLearningCasesDurableAsync();
     return NextResponse.json({
       googleDriveSheets: googleDriveSheetsBridge.getStatus(),
-      learningCasesCount: getRuntimeLearningDataset().length,
+      learningCasesCount: cases.length,
+      persistedBackend,
     });
   }
 
   if (pathKey === 'ai/learning-dataset') {
+    const { user } = await resolveRequestUser(req);
+    const { cases, persistedBackend } = await fetchLearningCasesDurableAsync({
+      includeAllForAdmin: isModerationAdmin(user),
+      userId: user?.id,
+    });
     return NextResponse.json({
-      total: getRuntimeLearningDataset().length,
-      cases: getRuntimeLearningDataset(),
+      total: cases.length,
+      cases,
+      persistedBackend,
     });
   }
 
@@ -255,25 +267,34 @@ export async function POST(
   }
 
   if (pathKey === 'ai/geometry-rag-audit') {
+    const { user } = await resolveRequestUser(req);
+    const { cases } = await fetchLearningCasesDurableAsync({
+      includeAllForAdmin: isModerationAdmin(user),
+      userId: user?.id,
+    });
     const fp = body.fingerprint;
     const rawProfile = body.profile || {};
-    const ragAudit = runSelfImprovingPhysicsAudit(fp, {
-      material: rawProfile.material || 'PLA',
-      layerHeightMm: Number(rawProfile.layerHeightMm || rawProfile.layerHeight || 0.2),
-      infillDensityPct: Number(rawProfile.infillDensityPct ?? rawProfile.infillDensity ?? 15),
-      infillPattern: rawProfile.infillPattern || rawProfile.infillType || 'gyroid',
-      wallLoops: Number(rawProfile.wallLoops || 2),
-      supportMode: rawProfile.supportMode || 'tree',
-      brimEnabled: Boolean(rawProfile.brimEnabled ?? true),
-      brimWidthMm: Number(rawProfile.brimWidthMm ?? 5),
-      printSpeedMmS: Number(rawProfile.printSpeedMmS || rawProfile.printSpeed || 200),
-      outerWallSpeedMmS: Number(rawProfile.outerWallSpeedMmS || rawProfile.outerWallSpeed || 120),
-      firstLayerSpeedMmS: Number(rawProfile.firstLayerSpeedMmS || rawProfile.firstLayerSpeed || 30),
-      nozzleTempC: Number(rawProfile.nozzleTempC || rawProfile.nozzleTemp || 215),
-      bedTempC: Number(rawProfile.bedTempC || rawProfile.bedTemp || 60),
-      coolingFanPct: Number(rawProfile.coolingFanPct ?? rawProfile.coolingFanSpeed ?? 100),
-      retractionMm: Number(rawProfile.retractionMm ?? rawProfile.retractionDistanceMm ?? 0.8),
-    });
+    const ragAudit = runSelfImprovingPhysicsAudit(
+      fp,
+      {
+        material: rawProfile.material || 'PLA',
+        layerHeightMm: Number(rawProfile.layerHeightMm || rawProfile.layerHeight || 0.2),
+        infillDensityPct: Number(rawProfile.infillDensityPct ?? rawProfile.infillDensity ?? 15),
+        infillPattern: rawProfile.infillPattern || rawProfile.infillType || 'gyroid',
+        wallLoops: Number(rawProfile.wallLoops || 2),
+        supportMode: rawProfile.supportMode || 'tree',
+        brimEnabled: Boolean(rawProfile.brimEnabled ?? true),
+        brimWidthMm: Number(rawProfile.brimWidthMm ?? 5),
+        printSpeedMmS: Number(rawProfile.printSpeedMmS || rawProfile.printSpeed || 200),
+        outerWallSpeedMmS: Number(rawProfile.outerWallSpeedMmS || rawProfile.outerWallSpeed || 120),
+        firstLayerSpeedMmS: Number(rawProfile.firstLayerSpeedMmS || rawProfile.firstLayerSpeed || 30),
+        nozzleTempC: Number(rawProfile.nozzleTempC || rawProfile.nozzleTemp || 215),
+        bedTempC: Number(rawProfile.bedTempC || rawProfile.bedTemp || 60),
+        coolingFanPct: Number(rawProfile.coolingFanPct ?? rawProfile.coolingFanSpeed ?? 100),
+        retractionMm: Number(rawProfile.retractionMm ?? rawProfile.retractionDistanceMm ?? 0.8),
+      },
+      cases
+    );
     return NextResponse.json(ragAudit);
   }
 
@@ -333,32 +354,106 @@ export async function POST(
   }
 
   if (pathKey === 'ai/record-learning-case') {
+    const { user } = await resolveRequestUser(req);
+    if (!user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Vui lòng đăng nhập tài khoản Laymor3D để lưu dữ liệu học hình học cho AI.',
+          code: 'AUTH_REQUIRED',
+        },
+        { status: 401 }
+      );
+    }
+
+    const adminCaller = isModerationAdmin(user);
     const newCase: IHistoricalLearningCase = {
       caseId: body.caseId || `case_${Date.now().toString(36)}`,
       modelId: body.modelId || 'mdl_custom',
-      modelName: body.modelName || 'Custom 3D Model',
-      material: body.material || 'PLA',
+      modelName: String(body.modelName || 'Custom 3D Model').slice(0, 120),
+      material: String(body.material || 'PLA').slice(0, 32),
       fingerprint: body.fingerprint,
       goldenProfile: body.goldenProfile || {},
       outcome: body.outcome || 'SIM_GOLDEN_PROFILE',
-      aiInsightLesson:
-        body.aiInsightLesson || 'Cấu hình đã được kiểm chứng qua giả lập vật lý 12 chiều.',
+      aiInsightLesson: String(
+        body.aiInsightLesson || 'Cấu hình đã được kiểm chứng qua giả lập vật lý 12 chiều.'
+      ).slice(0, 1000),
       recordedAt: new Date().toISOString(),
+      moderationStatus: adminCaller ? 'approved' : 'pending',
+      submittedByUserId: user.id,
+      submittedBy: user.username || user.name,
+      trustWeight: adminCaller ? 1.0 : 0.75,
     };
-    if (newCase.fingerprint) {
-      addRuntimeLearningCase(newCase);
-      const row = GoogleDriveSheetsBridge.formatAiLearningRow(
-        body.sessionId || 'session_manual',
-        newCase
+
+    if (!newCase.fingerprint) {
+      return NextResponse.json(
+        { success: false, error: 'Thiếu dữ liệu Geometry Fingerprint 12 chiều.' },
+        { status: 400 }
       );
-      await googleDriveSheetsBridge
-        .appendSheetRow('03_ai_learning_dataset', row)
-        .catch(() => null);
     }
+
+    const saveRes = await recordLearningCaseDurableAsync(newCase);
+    if (isNeonConfigured() && !saveRes.persistedToDb) {
+      return NextResponse.json(
+        { success: false, error: saveRes.error || 'Lỗi lưu ca học vào Neon Database.' },
+        { status: 503 }
+      );
+    }
+
+    const row = GoogleDriveSheetsBridge.formatAiLearningRow(
+      body.sessionId || 'session_manual',
+      saveRes.learningCase
+    );
+    await googleDriveSheetsBridge
+      .appendSheetRow('03_ai_learning_dataset', row)
+      .catch(() => null);
+
+    await auditLogRepository.addKnowledgeAuditLogAsync({
+      actorId: user.id,
+      actorName: user.name || user.username || user.id,
+      actorRole: user.role,
+      action: adminCaller ? 'knowledge_moderate' : 'knowledge_submit',
+      actionTitle: 'Ghi Nhận Ca Học Hình Học 12D AI',
+      entityId: saveRes.learningCase.caseId,
+      description: `${saveRes.learningCase.modelName} (${saveRes.learningCase.material}) [${saveRes.learningCase.moderationStatus}]`,
+      severity: 'info',
+    });
+
     return NextResponse.json({
       success: true,
-      caseId: newCase.caseId,
-      totalCases: getRuntimeLearningDataset().length,
+      caseId: saveRes.learningCase.caseId,
+      moderationStatus: saveRes.learningCase.moderationStatus,
+      persistedToDb: saveRes.persistedToDb,
+      totalCases: saveRes.totalCases,
+    });
+  }
+
+  if (pathKey === 'ai/moderate-learning-case') {
+    const { user } = await resolveRequestUser(req);
+    if (!user) {
+      return NextResponse.json({ success: false, error: 'Chưa đăng nhập' }, { status: 401 });
+    }
+    if (!isModerationAdmin(user)) {
+      return NextResponse.json(
+        { success: false, error: 'Chỉ Admin mới có quyền duyệt ca học RAG.' },
+        { status: 403 }
+      );
+    }
+    const caseId = String(body.caseId || '').trim();
+    const action = body.action === 'reject' ? 'reject' : 'approve';
+    if (!caseId) {
+      return NextResponse.json({ success: false, error: 'Thiếu caseId' }, { status: 400 });
+    }
+    const modRes = await moderateLearningCaseDurableAsync({
+      caseId,
+      action,
+      reviewerName: user.username || user.name || user.id,
+    });
+    return NextResponse.json({
+      success: true,
+      persistedToDb: modRes.persistedToDb,
+      caseId,
+      action,
     });
   }
 

@@ -706,6 +706,68 @@ export function ProfileSettingsPanel({
                         </div>
                       </div>
 
+                      <div className="grid grid-cols-2 gap-2 pt-2 border-t studio-border">
+                        <div className="space-y-1">
+                          <span className="text-[10px] studio-text-secondary">Khe XY tránh va chạm (mm)</span>
+                          <input
+                            type="number"
+                            step="0.05"
+                            min="0.15"
+                            max="1.2"
+                            value={profile.supportXyDistanceMm ?? 0.35}
+                            onChange={(e) =>
+                              onChangeProfile({ supportXyDistanceMm: Number(e.target.value) })
+                            }
+                            className="w-full px-2 py-1.5 rounded-lg glass-input text-xs font-mono font-semibold"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[10px] studio-text-secondary">Mở rộng vùng đỡ (mm)</span>
+                          <input
+                            type="number"
+                            step="0.2"
+                            min="-1.0"
+                            max="2.5"
+                            value={profile.supportExpansionMm ?? 0}
+                            onChange={(e) =>
+                              onChangeProfile({ supportExpansionMm: Number(e.target.value) })
+                            }
+                            className="w-full px-2 py-1.5 rounded-lg glass-input text-xs font-mono font-semibold"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <span className="text-[10px] studio-text-secondary">Mật độ đỉnh Tree (%)</span>
+                          <input
+                            type="number"
+                            step="5"
+                            min="10"
+                            max="100"
+                            value={profile.treeTopRatePercent ?? 30}
+                            onChange={(e) =>
+                              onChangeProfile({ treeTopRatePercent: Number(e.target.value) })
+                            }
+                            className="w-full px-2 py-1.5 rounded-lg glass-input text-xs font-mono font-semibold"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[10px] studio-text-secondary">Khoảng cách đệm (mm)</span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0"
+                            max="1.0"
+                            value={profile.supportInterfaceSpacingMm ?? 0.4}
+                            onChange={(e) =>
+                              onChangeProfile({ supportInterfaceSpacingMm: Number(e.target.value) })
+                            }
+                            className="w-full px-2 py-1.5 rounded-lg glass-input text-xs font-mono font-semibold"
+                          />
+                        </div>
+                      </div>
+
                       <div className="flex items-center justify-between pt-2 border-t studio-border">
                         <div>
                           <div className="text-[11px] studio-text-primary font-medium">
@@ -720,6 +782,25 @@ export function ProfileSettingsPanel({
                           checked={profile.supportOnBuildPlateOnly !== false}
                           onChange={(e) =>
                             onChangeProfile({ supportOnBuildPlateOnly: e.target.checked })
+                          }
+                          className="w-4 h-4 accent-[var(--accent-gold)] rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t studio-border">
+                        <div>
+                          <div className="text-[11px] studio-text-primary font-medium">
+                            Xem Nhanh Mẫu Siêu Cao (Fast Preview)
+                          </div>
+                          <div className="text-[9px] studio-text-secondary">
+                            Tắt mặc định để giữ nguyên 100% chiều cao lớp thực
+                          </div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(profile.fastPreviewMode)}
+                          onChange={(e) =>
+                            onChangeProfile({ fastPreviewMode: e.target.checked })
                           }
                           className="w-4 h-4 accent-[var(--accent-gold)] rounded cursor-pointer"
                         />

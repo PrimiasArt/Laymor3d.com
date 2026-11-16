@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { ViewerOptions } from '@/hooks/useModelViewer';
@@ -52,8 +54,9 @@ export function ThreeCanvasViewer({
   const modelScaleGroupRef = useRef<THREE.Group | null>(null);
   // modelMeshGroup: Chứa geometry mô hình 3D
   const modelMeshGroupRef = useRef<THREE.Group | null>(null);
-  // supportGroup: Cấu trúc chống đỡ Support (Tree/Normal)
+  // supportGroup: Cấu trúc chống đỡ Support (OrcaSlicer C++ WASM)
   const supportGroupRef = useRef<THREE.Group | null>(null);
+  const [orcaSupportStatus, setOrcaSupportStatus] = useState<string | null>(null);
   // dimBoxGroup: Khung bao viền kích thước 3 chiều (Dimension Bounding Box)
   const dimBoxGroupRef = useRef<THREE.Group | null>(null);
 
@@ -171,6 +174,7 @@ export function ThreeCanvasViewer({
     // J. GROUP HIERARCHY FOR ROBUST TRANSFORMS:
     // 1. masterOrbitGroup: Xoay vòng quanh bàn in
     const masterOrbit = new THREE.Group();
+    masterOrbit.rotation.y = 0.55;
     scene.add(masterOrbit);
     masterOrbitGroupRef.current = masterOrbit;
 
@@ -190,25 +194,15 @@ export function ThreeCanvasViewer({
     modelScaleGroup.add(meshGroup);
     modelMeshGroupRef.current = meshGroup;
 
-    // 5. supportGroup: Chứa Support
+    // 5. supportGroup: Gắn vào masterOrbit để tọa độ STL/Tree Support C++ thẳng trục bàn in (y = -1.5)
     const supportGroup = new THREE.Group();
-    modelScaleGroup.add(supportGroup);
+    masterOrbit.add(supportGroup);
     supportGroupRef.current = supportGroup;
 
     // K. Build Initial Model
     const { group: initialMeshGroup, height: builtHeight } = ModelBuilder.buildModel(sampleModelId, material);
     modelHeightRef.current = builtHeight;
     meshGroup.add(initialMeshGroup);
-
-    // L. Build Initial Supports if enabled
-    if (supportConfig?.enabled && supportConfig.type !== 'none') {
-      const initialSupports = SupportBuilder.buildSupports(
-        supportConfig.type,
-        sampleModelId,
-        clipPlane
-      );
-      supportGroup.add(initialSupports);
-    }
 
     // M. Mouse Orbit Handlers
     const onMouseDown = (e: MouseEvent) => {
@@ -475,22 +469,69 @@ export function ThreeCanvasViewer({
     updateOrientationAndGrounding();
   }, [dimensionsMm, sampleModelId, customLoadedModel, updateOrientationAndGrounding]);
 
-  // 5. Update Virtual Support Structures (Organic Tree Support)
+  // 5. Update Support Structures via Real C++ OrcaSlicer WASM Engine (shared worker from /3dsim)
   useEffect(() => {
     if (!supportGroupRef.current) return;
     const sGroup = supportGroupRef.current;
     sGroup.clear();
 
-    if (!supportConfig?.enabled || supportConfig.type === 'none') return;
+    if (!supportConfig?.enabled || supportConfig.type === 'none') {
+      setOrcaSupportStatus(null);
+      return;
+    }
 
-    const supports = SupportBuilder.buildSupports(
-      supportConfig.type,
-      sampleModelId,
-      clipPlaneRef.current || undefined,
-      sampleModelId === 'custom' ? customLoadedModel?.group : undefined
+    let cancelled = false;
+    setOrcaSupportStatus(
+      supportConfig.type === 'tree'
+        ? 'Đang dựng Tree Support Orca C++...'
+        : 'Đang dựng Support Grid Orca C++...'
     );
-    sGroup.add(supports);
-  }, [supportConfig, sampleModelId, customLoadedModel]);
+
+    const activeSourceGroup = modelMeshGroupRef.current || undefined;
+
+    SupportBuilder.buildSupportsAsync({
+      type: supportConfig.type,
+      modelId: sampleModelId,
+      clipPlane: clipPlaneRef.current || undefined,
+      sourceGroup: activeSourceGroup,
+      rootSpaceGroup: masterOrbitGroupRef.current || undefined,
+      orientationDeg: options.orientationDeg || 0,
+      dimensionsMm,
+      overhangThresholdDeg: supportConfig.overhangThresholdDegrees,
+      branchDiameterMm: supportConfig.branchDiameterMm,
+      interfaceLayers: supportConfig.interfaceLayers,
+      onProgress: (pct) => {
+        if (!cancelled) {
+          setOrcaSupportStatus(`Orca C++ Support ${pct}%`);
+        }
+      },
+    })
+      .then((supports) => {
+        if (cancelled || !supportGroupRef.current) return;
+        supportGroupRef.current.clear();
+        supportGroupRef.current.add(supports);
+        setOrcaSupportStatus(
+          supports.children.length > 0
+            ? `✓ Orca C++ ${supportConfig.type === 'tree' ? 'Tree' : 'Grid'} Support`
+            : 'Không có Overhang cần đỡ'
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setOrcaSupportStatus(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    supportConfig,
+    sampleModelId,
+    customLoadedModel,
+    dimensionsMm.x,
+    dimensionsMm.y,
+    dimensionsMm.z,
+    options.orientationDeg,
+  ]);
 
   // 6. Cập nhật góc đặt và căn phẳng bàn in khi options.orientationDeg hoặc options.showDimensions thay đổi
   useEffect(() => {
@@ -677,6 +718,12 @@ export function ThreeCanvasViewer({
             <UploadCloud className="w-4 h-4 text-indigo-400" />
             <span>Nạp File 3D</span>
           </button>
+        )}
+        {orcaSupportStatus && (
+          <div className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 text-[10px] font-mono font-bold backdrop-blur-md shadow-md">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span>{orcaSupportStatus}</span>
+          </div>
         )}
       </div>
 

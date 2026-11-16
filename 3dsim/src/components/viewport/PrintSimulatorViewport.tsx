@@ -31,8 +31,16 @@ import {
   buildOrcaSliceCacheKey,
   buildOrcaGpuToolpathGroup,
   warmupOrcaWasmEngine,
+  prepareModelForSupportPaint,
+  applySupportPaintStroke,
+  previewSupportFillUnderCursor,
+  clearAllSupportPaint,
+  setSupportPaintOverhangFilter,
+  getSupportPaintOverlay,
   type IOrcaWasmSliceBundle,
   type IOrcaWasmSliceStats,
+  type SupportPaintRole,
+  type SupportPaintTool,
 } from '@/services/orcaWasmSlicerService';
 import type {
   FilamentColorScheme,
@@ -173,6 +181,9 @@ export function PrintSimulatorViewport({
   const controlsRef = useRef<OrbitControls | null>(null);
 
   const modelRootGroupRef = useRef<THREE.Group | null>(null);
+  const worldSliceGroupRef = useRef<THREE.Group | null>(null);
+  const worldMinYOffsetRef = useRef<number>(0);
+  const lastOrcaCacheKeyRef = useRef<string>('');
   const modelMeshRef = useRef<THREE.Mesh | null>(null);
   const ghostMeshRef = useRef<THREE.Mesh | null>(null);
   const fullFilamentGroupRef = useRef<THREE.Group | null>(null);
@@ -184,6 +195,25 @@ export function PrintSimulatorViewport({
   const defectGroupRef = useRef<THREE.Group | null>(null);
   const footprintMeshRef = useRef<THREE.Mesh | null>(null);
   const lastRenderedLayerRef = useRef<number>(-1);
+
+  // C++ Support Painting Mode State & Meshes
+  const [isPaintModeOpen, setIsPaintModeOpen] = useState(false);
+  const [paintRole, setPaintRole] = useState<SupportPaintRole>('enforcer');
+  const [paintTool, setPaintTool] = useState<SupportPaintTool>('sphere');
+  const [paintBrushRadius, setPaintBrushRadius] = useState<number>(5.0);
+  const [paintSmartAngle, setPaintSmartAngle] = useState<number>(profile.supportAngleThreshold ?? 30);
+  const [paintOverhangOnly, setPaintOverhangOnly] = useState<boolean>(false);
+  const [paintCounts, setPaintCounts] = useState<{ enf: number; blk: number }>({ enf: 0, blk: 0 });
+  const [paintStatusLabel, setPaintStatusLabel] = useState<string | null>(null);
+  const [paintSliceTrigger, setPaintSliceTrigger] = useState<number>(0);
+
+  const paintRaycastMeshRef = useRef<THREE.Mesh | null>(null);
+  const paintEnfMeshRef = useRef<THREE.Mesh | null>(null);
+  const paintBlkMeshRef = useRef<THREE.Mesh | null>(null);
+  const paintFillPreviewMeshRef = useRef<THREE.Mesh | null>(null);
+  const isPaintingStrokeRef = useRef(false);
+  const prevPaintPointRef = useRef<[number, number, number] | null>(null);
+  const lastPaintMoveAtRef = useRef<number>(0);
 
   const transformControlsRef = useRef<TransformControls | null>(null);
   const [activeGizmoMode, setActiveGizmoMode] = useState<'move' | 'rotate' | 'scale' | null>(null);
@@ -219,6 +249,110 @@ export function PrintSimulatorViewport({
   const orcaSliceBundleRef = useRef<IOrcaWasmSliceBundle | null>(null);
   orcaSliceBundleRef.current = orcaSliceBundle;
   const lastGeometryUuidRef = useRef<string>(geometry.uuid);
+
+  const bakeTransformForOrca = (src: THREE.BufferGeometry, tr: IModelTransform) => {
+    const hasRot =
+      Math.abs(tr.rotation[0]) > 1e-4 ||
+      Math.abs(tr.rotation[1]) > 1e-4 ||
+      Math.abs(tr.rotation[2]) > 1e-4;
+    const hasScale = Math.abs(tr.scale - 1) > 1e-4;
+    const baked = src.clone();
+    if (hasRot || hasScale) {
+      const mat = new THREE.Matrix4().compose(
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(tr.rotation[0], tr.rotation[1], tr.rotation[2])
+        ),
+        new THREE.Vector3(tr.scale, tr.scale, tr.scale)
+      );
+      baked.applyMatrix4(mat);
+    }
+    baked.computeBoundingBox();
+    const minY = baked.boundingBox?.min.y ?? 0;
+    if (Math.abs(minY) > 1e-4) {
+      baked.translate(0, -minY, 0);
+      baked.computeBoundingBox();
+    }
+    return { bakedGeom: baked, minYOffset: minY };
+  };
+
+  const applyFlatTrisToMesh = (mesh: THREE.Mesh | null, flatTris: Float32Array) => {
+    if (!mesh) return;
+    mesh.geometry?.dispose();
+    if (!flatTris || flatTris.length < 9) {
+      mesh.geometry = new THREE.BufferGeometry();
+      mesh.visible = false;
+      return;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(flatTris, 3));
+    g.computeVertexNormals();
+    mesh.geometry = g;
+    mesh.visible = true;
+  };
+
+  useEffect(() => {
+    if (!isPaintModeOpen) {
+      if (paintFillPreviewMeshRef.current) paintFillPreviewMeshRef.current.visible = false;
+      previewSupportFillUnderCursor({ tool: 'smart', clear: true }).catch(() => {});
+      return;
+    }
+
+    let cancelled = false;
+    setPaintStatusLabel('Đang chuẩn bị lưới C++ Paint...');
+    const { bakedGeom, minYOffset } = bakeTransformForOrca(geometry, modelTransformRef.current);
+    worldMinYOffsetRef.current = minYOffset;
+    if (worldSliceGroupRef.current) {
+      const p = modelTransformRef.current.position;
+      worldSliceGroupRef.current.position.set(p[0], p[1] + minYOffset, p[2]);
+    }
+
+    prepareModelForSupportPaint(bakedGeom)
+      .then(async (prep) => {
+        bakedGeom.dispose();
+        if (cancelled) return;
+        if (paintRaycastMeshRef.current) {
+          paintRaycastMeshRef.current.geometry?.dispose();
+          const rayGeom = new THREE.BufferGeometry();
+          rayGeom.setAttribute('position', new THREE.BufferAttribute(prep.raycastPositions, 3));
+          rayGeom.computeBoundingSphere();
+          paintRaycastMeshRef.current.geometry = rayGeom;
+        }
+        await setSupportPaintOverhangFilter(paintOverhangOnly ? paintSmartAngle : 0);
+        const overlay = await getSupportPaintOverlay();
+        if (cancelled) return;
+        applyFlatTrisToMesh(paintEnfMeshRef.current, overlay.enf);
+        applyFlatTrisToMesh(paintBlkMeshRef.current, overlay.blk);
+        setPaintCounts({
+          enf: Math.floor(overlay.enf.length / 9),
+          blk: Math.floor(overlay.blk.length / 9),
+        });
+        setPaintStatusLabel('Sẵn sàng: Nhấp / kéo trực tiếp trên mẫu để tô vùng đỡ!');
+      })
+      .catch((err) => {
+        bakedGeom.dispose();
+        if (!cancelled) {
+          setPaintStatusLabel(`Lỗi chuẩn bị C++ Paint: ${err?.message || 'Error'}`);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isPaintModeOpen,
+    geometry,
+    modelTransform.scale,
+    modelTransform.rotation[0],
+    modelTransform.rotation[1],
+    modelTransform.rotation[2],
+  ]);
+
+  // Sync overhang paint filter when user toggles or adjusts angle
+  useEffect(() => {
+    if (!isPaintModeOpen) return;
+    setSupportPaintOverhangFilter(paintOverhangOnly ? paintSmartAngle : 0).catch(() => {});
+  }, [isPaintModeOpen, paintOverhangOnly, paintSmartAngle]);
 
   // Khởi động ấm nhân C++ OrcaSlicer WASM ở chế độ nền
   useEffect(() => {
@@ -461,11 +595,48 @@ export function PrintSimulatorViewport({
     toolheadGroupRef.current = toolhead;
     scene.add(toolhead);
 
-    // 1.9.5 Root Model Group (Chứa toàn bộ cụm mô hình, support, brim để di chuyển đồng bộ)
+    // 1.9.5 Root Model Group (Chứa toàn bộ cụm mô hình phôi STL; transform áp trực tiếp trên group này)
     const modelRootGroup = new THREE.Group();
     modelRootGroup.name = 'model_root_group';
     scene.add(modelRootGroup);
     modelRootGroupRef.current = modelRootGroup;
+
+    // 1.9.6 World-Aligned Slicer Group (Chứa Support C++, Sợi GPU, và lớp sơn Support đã bake đúng rotation/scale thế giới)
+    const worldSliceGroup = new THREE.Group();
+    worldSliceGroup.name = 'world_slice_group';
+    scene.add(worldSliceGroup);
+    worldSliceGroupRef.current = worldSliceGroup;
+
+    // 1.9.7 Paint Overlay Meshes (Enforcer Green #10b981, Blocker Red #f43f5e, Fill Hover #38bdf8)
+    const paintRaycastMat = new THREE.MeshBasicMaterial({
+      visible: false,
+      side: THREE.DoubleSide,
+    });
+    const paintRaycastMesh = new THREE.Mesh(new THREE.BufferGeometry(), paintRaycastMat);
+    paintRaycastMesh.name = 'support_paint_raycast_proxy';
+    worldSliceGroup.add(paintRaycastMesh);
+    paintRaycastMeshRef.current = paintRaycastMesh;
+
+    const createPaintOverlayMesh = (colorHex: number, opacity: number, name: string) => {
+      const mat = new THREE.MeshBasicMaterial({
+        color: colorHex,
+        transparent: true,
+        opacity,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+        side: THREE.DoubleSide,
+      });
+      const m = new THREE.Mesh(new THREE.BufferGeometry(), mat);
+      m.name = name;
+      m.renderOrder = 12;
+      worldSliceGroup.add(m);
+      return m;
+    };
+    paintEnfMeshRef.current = createPaintOverlayMesh(0x10b981, 0.72, 'paint_enforcer_overlay');
+    paintBlkMeshRef.current = createPaintOverlayMesh(0xf43f5e, 0.72, 'paint_blocker_overlay');
+    paintFillPreviewMeshRef.current = createPaintOverlayMesh(0x38bdf8, 0.48, 'paint_fill_preview_overlay');
 
     // 1.10 Active Slice Group (Chứa đường toolpath perimeters + infill trên mặt cắt)
     const activeSliceGroup = new THREE.Group();
@@ -740,13 +911,21 @@ export function PrintSimulatorViewport({
         String((currentModel as any)?.path || '').startsWith('bambu-native-')
     );
 
-    const currentOrcaKey = buildOrcaSliceCacheKey(geometry, profile);
+    const sliceTargetParent =
+      !isExplicitBambuGcode && worldSliceGroupRef.current
+        ? worldSliceGroupRef.current
+        : parentGroup;
+
+    const currentOrcaKey =
+      lastOrcaCacheKeyRef.current || buildOrcaSliceCacheKey(geometry, profile);
     const readyOrcaBundle =
-      !isExplicitBambuGcode && orcaSliceBundleRef.current?.cacheKey === currentOrcaKey
+      !isExplicitBambuGcode &&
+      orcaSliceBundleRef.current &&
+      orcaSliceBundleRef.current.cacheKey === currentOrcaKey
         ? orcaSliceBundleRef.current
         : null;
 
-    // 2.4 Cập nhật Support (Bảo toàn 100% lưới Orca C++ TreeSupport3D, tuyệt đối không sinh cọc JS xuyên mẫu)
+    // 2.4 Cập nhật Support (Bảo toàn 100% lưới Orca C++ TreeSupport3D trên worldSliceGroupRef)
     const supportGroup = updateSupportStructures(
       parentGroup,
       clonedGeom,
@@ -756,25 +935,29 @@ export function PrintSimulatorViewport({
       (currentModel as any)?.path,
       clippingPlaneRef.current || undefined,
       readyOrcaBundle,
-      isSameGeometry
+      isSameGeometry,
+      sliceTargetParent
     );
     supportGroupRef.current = supportGroup;
 
     // 2.4.5 Cập nhật Full Filament Toolpath Preview
     const removeExistingFilament = () => {
-      let old: THREE.Object3D | undefined;
-      while ((old = parentGroup.getObjectByName('full_filament_preview_group')) !== undefined) {
-        parentGroup.remove(old);
-        if (old.userData?.dispose) {
-          old.userData.dispose();
-        } else {
-          old.traverse((c) => {
-            if (c instanceof THREE.LineSegments || c instanceof THREE.Points || c instanceof THREE.Mesh) {
-              c.geometry.dispose();
-              if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
-              else c.material.dispose();
-            }
-          });
+      for (const host of [parentGroup, worldSliceGroupRef.current]) {
+        if (!host) continue;
+        let old: THREE.Object3D | undefined;
+        while ((old = host.getObjectByName('full_filament_preview_group')) !== undefined) {
+          host.remove(old);
+          if (old.userData?.dispose) {
+            old.userData.dispose();
+          } else {
+            old.traverse((c) => {
+              if (c instanceof THREE.LineSegments || c instanceof THREE.Points || c instanceof THREE.Mesh) {
+                c.geometry.dispose();
+                if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
+                else c.material.dispose();
+              }
+            });
+          }
         }
       }
       fullFilamentGroupRef.current = null;
@@ -857,7 +1040,7 @@ export function PrintSimulatorViewport({
       } else if (readyOrcaBundle && !fullFilamentGroupRef.current) {
         const gpuGroup = buildOrcaGpuToolpathGroup(readyOrcaBundle.segData, profile);
         gpuGroup.visible = viewMode === 'filament_preview';
-        parentGroup.add(gpuGroup);
+        sliceTargetParent.add(gpuGroup);
         fullFilamentGroupRef.current = gpuGroup;
         gpuGroup.userData?.setColorScheme?.(filamentColorScheme);
         gpuGroup.userData?.setIntraLayerProgress?.(intraLayerProgress);
@@ -1077,7 +1260,10 @@ export function PrintSimulatorViewport({
         label: 'Đang cắt Orca C++...',
       });
 
-      sliceGeometryWithOrcaWasm(geometry, modelLabel, profile, {
+      const { bakedGeom, minYOffset } = bakeTransformForOrca(geometry, modelTransformRef.current);
+      worldMinYOffsetRef.current = minYOffset;
+
+      sliceGeometryWithOrcaWasm(bakedGeom, modelLabel, profile, {
         onProgress: (pct, stageText) => {
           if (cancelled || orcaJobTokenRef.current !== token) return;
           setSlicingProgressPct(pct);
@@ -1096,12 +1282,13 @@ export function PrintSimulatorViewport({
           setSlicingProgressPct(null);
           setOrcaProgressLabel(null);
 
-          if (!bundle || !modelRootGroupRef.current) {
+          if (!bundle || (!worldSliceGroupRef.current && !modelRootGroupRef.current)) {
             onOrcaStatusChange?.({ active: false, ready: false, percent: null, label: null });
             return;
           }
 
           orcaSliceBundleRef.current = bundle;
+          lastOrcaCacheKeyRef.current = bundle.cacheKey;
           setOrcaSliceBundle(bundle);
           onOrcaStatsReady?.(bundle.stats);
           const mtTag = bundle.stats.kernelMode === 'mt' ? 'MT ' : '';
@@ -1115,19 +1302,29 @@ export function PrintSimulatorViewport({
                 : `Orca C++ ${mtTag}(${bundle.stats.totalLayers} lớp)`,
           });
 
-          const parentGroup = modelRootGroupRef.current;
+          const sliceHost = worldSliceGroupRef.current || modelRootGroupRef.current!;
+          if (worldSliceGroupRef.current) {
+            const p = modelTransformRef.current.position;
+            worldSliceGroupRef.current.position.set(p[0], p[1] + minYOffset, p[2]);
+          }
           const curViewMode = viewModeRef.current;
           const curShowSupport = showSupportRef.current;
 
-          // 1. Dựng lưới 3D Organic Tree Support chuẩn xác 100% từ OrcaSlicer C++
-          let curSupportGroup = parentGroup.getObjectByName(
+          // Clear stale support in modelRootGroup if transitioning into worldSliceGroup
+          if (modelRootGroupRef.current && sliceHost !== modelRootGroupRef.current) {
+            const legacy = modelRootGroupRef.current.getObjectByName('support_structures_group');
+            if (legacy) modelRootGroupRef.current.remove(legacy);
+          }
+
+          // 1. Dựng lưới 3D Organic Tree Support chuẩn xác 100% từ OrcaSlicer C++ trên World Space
+          let curSupportGroup = sliceHost.getObjectByName(
             'support_structures_group'
           ) as THREE.Group | undefined;
           if (profile.supportMode !== 'none') {
             if (!curSupportGroup) {
               curSupportGroup = new THREE.Group();
               curSupportGroup.name = 'support_structures_group';
-              parentGroup.add(curSupportGroup);
+              sliceHost.add(curSupportGroup);
               supportGroupRef.current = curSupportGroup;
             }
             while (curSupportGroup.children.length > 0) {
@@ -1160,32 +1357,35 @@ export function PrintSimulatorViewport({
           }
 
           // 2. Dựng ngay hệ thống Sợi In 3D GPU-Instanced (three-slicer-viewer/toolpath) để chuyển tab 0ms!
-          let oldFg: THREE.Object3D | undefined;
-          while (
-            (oldFg = parentGroup.getObjectByName('full_filament_preview_group')) !== undefined
-          ) {
-            parentGroup.remove(oldFg);
-            if (oldFg.userData?.dispose) {
-              oldFg.userData.dispose();
-            } else {
-              oldFg.traverse((c) => {
-                if (
-                  c instanceof THREE.LineSegments ||
-                  c instanceof THREE.Points ||
-                  c instanceof THREE.Mesh
-                ) {
-                  c.geometry.dispose();
-                  if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
-                  else c.material.dispose();
-                }
-              });
+          for (const host of [sliceHost, modelRootGroupRef.current]) {
+            if (!host) continue;
+            let oldFg: THREE.Object3D | undefined;
+            while (
+              (oldFg = host.getObjectByName('full_filament_preview_group')) !== undefined
+            ) {
+              host.remove(oldFg);
+              if (oldFg.userData?.dispose) {
+                oldFg.userData.dispose();
+              } else {
+                oldFg.traverse((c) => {
+                  if (
+                    c instanceof THREE.LineSegments ||
+                    c instanceof THREE.Points ||
+                    c instanceof THREE.Mesh
+                  ) {
+                    c.geometry.dispose();
+                    if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
+                    else c.material.dispose();
+                  }
+                });
+              }
             }
           }
 
           const gpuGroup = buildOrcaGpuToolpathGroup(bundle.segData, profile);
           const isFilamentActive = curViewMode === 'filament_preview';
           gpuGroup.visible = isFilamentActive;
-          parentGroup.add(gpuGroup);
+          sliceHost.add(gpuGroup);
           fullFilamentGroupRef.current = gpuGroup;
 
           gpuGroup.userData?.setColorScheme?.(filamentColorScheme);
@@ -1209,6 +1409,9 @@ export function PrintSimulatorViewport({
             setOrcaProgressLabel(null);
             onOrcaStatusChange?.({ active: false, ready: false, percent: null, label: null });
           }
+        })
+        .finally(() => {
+          bakedGeom.dispose();
         });
     }, 110);
 
@@ -1218,9 +1421,14 @@ export function PrintSimulatorViewport({
     };
   }, [
     geometry,
+    modelTransform.scale,
+    modelTransform.rotation[0],
+    modelTransform.rotation[1],
+    modelTransform.rotation[2],
     currentModel?.id,
     currentModel?.name,
     (currentModel as any)?.path,
+    profile.nozzleDiameter,
     profile.layerHeight,
     profile.firstLayerHeight,
     profile.lineWidth,
@@ -1236,10 +1444,19 @@ export function PrintSimulatorViewport({
     profile.treeStyle,
     profile.supportAngleThreshold,
     profile.supportTopZDistance,
+    profile.supportBottomZDistance,
     profile.supportBranchDiameter,
     profile.supportBranchAngle,
     profile.supportInterfaceLayers,
     profile.supportOnBuildPlateOnly,
+    profile.supportOverhangMinArea,
+    profile.supportExpansionMm,
+    profile.supportXyDistanceMm,
+    profile.supportInterfaceSpacingMm,
+    profile.treeTopRatePercent,
+    profile.treeBranchDiameterAngleDeg,
+    profile.supportPaintMode,
+    profile.fastPreviewMode,
     profile.brimEnabled,
     profile.brimWidthMm,
     profile.raftLayers,
@@ -1247,26 +1464,35 @@ export function PrintSimulatorViewport({
     profile.nozzleTemp,
     profile.bedTemp,
     treeResliceNonce,
+    paintSliceTrigger,
   ]);
 
   // 2.6 Đồng bộ Transform khi người dùng tương tác với Bảng Điều Khiển Bàn In hoặc Kéo chuột
   useEffect(() => {
-    if (!modelRootGroupRef.current) return;
-    modelRootGroupRef.current.position.set(
-      modelTransform.position[0],
-      modelTransform.position[1],
-      modelTransform.position[2]
-    );
-    modelRootGroupRef.current.rotation.set(
-      modelTransform.rotation[0],
-      modelTransform.rotation[1],
-      modelTransform.rotation[2]
-    );
-    modelRootGroupRef.current.scale.set(
-      modelTransform.scale,
-      modelTransform.scale,
-      modelTransform.scale
-    );
+    if (modelRootGroupRef.current) {
+      modelRootGroupRef.current.position.set(
+        modelTransform.position[0],
+        modelTransform.position[1],
+        modelTransform.position[2]
+      );
+      modelRootGroupRef.current.rotation.set(
+        modelTransform.rotation[0],
+        modelTransform.rotation[1],
+        modelTransform.rotation[2]
+      );
+      modelRootGroupRef.current.scale.set(
+        modelTransform.scale,
+        modelTransform.scale,
+        modelTransform.scale
+      );
+    }
+    if (worldSliceGroupRef.current) {
+      worldSliceGroupRef.current.position.set(
+        modelTransform.position[0],
+        modelTransform.position[1] + worldMinYOffsetRef.current,
+        modelTransform.position[2]
+      );
+    }
   }, [modelTransform]);
 
   // 2.7 Đồng bộ TransformControls Gizmo (Xoay 3D / Di chuyển X-Z)
@@ -1478,10 +1704,11 @@ export function PrintSimulatorViewport({
     ) {
       if (!isExplicitBambuGcode) {
         // Với phôi 3MF / STL / Mẫu có sẵn: Dùng trực tiếp kết quả GPU Toolpath từ nhân OrcaSlicer C++ WASM
-        if (orcaSliceBundleRef.current && modelRootGroupRef.current) {
+        const sliceHost = worldSliceGroupRef.current || modelRootGroupRef.current;
+        if (orcaSliceBundleRef.current && sliceHost) {
           const gpuGroup = buildOrcaGpuToolpathGroup(orcaSliceBundleRef.current.segData, profile);
           gpuGroup.visible = true;
-          modelRootGroupRef.current.add(gpuGroup);
+          sliceHost.add(gpuGroup);
           fullFilamentGroupRef.current = gpuGroup;
           gpuGroup.userData?.setColorScheme?.(filamentColorScheme);
           gpuGroup.userData?.setIntraLayerProgress?.(intraLayerProgress);
@@ -1677,13 +1904,90 @@ export function PrintSimulatorViewport({
     }
   };
 
-  // Tương tác chuột kéo rê mô hình trực tiếp trên bàn in (Bed Dragging)
+  const runPaintSampleAtPointer = (isStrokeStart: boolean, isHoverOnly: boolean) => {
+    if (!paintRaycastMeshRef.current || !cameraRef.current || !worldSliceGroupRef.current) return false;
+    raycasterRef.current.setFromCamera(mousePosRef.current, cameraRef.current);
+    // Temporarily enable raycasting even though mesh material is invisible by intersecting directly with geometry
+    const origVis = paintRaycastMeshRef.current.material;
+    const tmpPrev = Array.isArray(origVis) ? origVis[0].visible : origVis.visible;
+    if (Array.isArray(origVis)) origVis.forEach((m) => (m.visible = true));
+    else origVis.visible = true;
+    const hits = raycasterRef.current.intersectObject(paintRaycastMeshRef.current, false);
+    if (Array.isArray(origVis)) origVis.forEach((m) => (m.visible = tmpPrev));
+    else origVis.visible = tmpPrev;
+
+    if (hits.length === 0 || hits[0].faceIndex == null) {
+      if (isHoverOnly && (paintTool === 'smart' || paintTool === 'bucket')) {
+        applyFlatTrisToMesh(paintFillPreviewMeshRef.current, new Float32Array(0));
+      }
+      return false;
+    }
+
+    const hit = hits[0];
+    const hitFacet = Number(hit.faceIndex);
+    const origin = worldSliceGroupRef.current.position;
+    const hx = hit.point.x - origin.x;
+    const hy = hit.point.y - origin.y;
+    const hz = hit.point.z - origin.z;
+    const camPos = cameraRef.current.position;
+    const cx = camPos.x - origin.x;
+    const cy = camPos.y - origin.y;
+    const cz = camPos.z - origin.z;
+
+    if (isHoverOnly) {
+      if (paintTool === 'smart' || paintTool === 'bucket') {
+        previewSupportFillUnderCursor({
+          tool: paintTool,
+          facet: hitFacet,
+          hitPointThree: [hx, hy, hz],
+          smartAngleDeg: paintSmartAngle,
+        })
+          .then((tris) => applyFlatTrisToMesh(paintFillPreviewMeshRef.current, tris))
+          .catch(() => {});
+      }
+      return true;
+    }
+
+    const prevPt = !isStrokeStart && prevPaintPointRef.current ? prevPaintPointRef.current : undefined;
+    prevPaintPointRef.current = [hx, hy, hz];
+
+    applySupportPaintStroke({
+      role: paintRole,
+      tool: paintTool,
+      facet: hitFacet,
+      hitPointThree: [hx, hy, hz],
+      prevPointThree: prevPt,
+      cameraPosThree: [cx, cy, cz],
+      radiusMm: paintBrushRadius,
+      smartAngleDeg: paintSmartAngle,
+    })
+      .then((res) => {
+        setPaintCounts({ enf: res.enf, blk: res.blk });
+        applyFlatTrisToMesh(paintEnfMeshRef.current, res.overlayEnf);
+        applyFlatTrisToMesh(paintBlkMeshRef.current, res.overlayBlk);
+      })
+      .catch(() => {});
+
+    return true;
+  };
+
+  // Tương tác chuột: Support Painting (khi mở Paint Mode) hoặc Kéo rê mô hình trên bàn in (Bed Dragging)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !containerRef.current || !cameraRef.current || !modelRootGroupRef.current) return;
 
     const rect = containerRef.current.getBoundingClientRect();
     mousePosRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     mousePosRef.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+    if (isPaintModeOpen) {
+      prevPaintPointRef.current = null;
+      const hitModel = runPaintSampleAtPointer(true, false);
+      if (hitModel) {
+        isPaintingStrokeRef.current = true;
+        if (controlsRef.current) controlsRef.current.enabled = false;
+      }
+      return;
+    }
 
     raycasterRef.current.setFromCamera(mousePosRef.current, cameraRef.current);
     const intersects = raycasterRef.current.intersectObjects(modelRootGroupRef.current.children, true);
@@ -1711,6 +2015,21 @@ export function PrintSimulatorViewport({
     mousePosRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     mousePosRef.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
+    if (isPaintModeOpen) {
+      const now = performance.now();
+      if (isPaintingStrokeRef.current && paintTool === 'sphere') {
+        if (now - lastPaintMoveAtRef.current >= 28) {
+          lastPaintMoveAtRef.current = now;
+          runPaintSampleAtPointer(false, false);
+        }
+      } else if (!isPaintingStrokeRef.current && now - lastPaintMoveAtRef.current >= 55) {
+        lastPaintMoveAtRef.current = now;
+        runPaintSampleAtPointer(false, true);
+      }
+      containerRef.current.style.cursor = 'crosshair';
+      return;
+    }
+
     if (isDraggingModelRef.current) {
       raycasterRef.current.setFromCamera(mousePosRef.current, cameraRef.current);
       const intersectPoint = new THREE.Vector3();
@@ -1736,6 +2055,11 @@ export function PrintSimulatorViewport({
   };
 
   const handlePointerUp = () => {
+    if (isPaintingStrokeRef.current) {
+      isPaintingStrokeRef.current = false;
+      prevPaintPointRef.current = null;
+      if (controlsRef.current) controlsRef.current.enabled = true;
+    }
     if (isDraggingModelRef.current) {
       isDraggingModelRef.current = false;
       if (controlsRef.current) controlsRef.current.enabled = true;
@@ -2029,9 +2353,216 @@ export function PrintSimulatorViewport({
                 <span className="hidden md:inline">Overhang</span>
               </button>
             )}
+
+            {viewMode !== 'filament_preview' && (
+              <button
+                type="button"
+                data-testid="viewport-toggle-paint-btn"
+                onClick={() => setIsPaintModeOpen((v) => !v)}
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                  isPaintModeOpen
+                    ? 'bg-emerald-500 text-slate-950 font-bold shadow-xs'
+                    : 'studio-pill-inactive hover:text-emerald-400'
+                }`}
+                title="Mở Cọ Tô Vùng Đỡ C++ (Xanh: Ép đỡ • Đỏ: Cấm đỡ • Smart Fill)"
+              >
+                <IconSliders size={11} />
+                <span className="hidden md:inline">Tô Đỡ</span>
+                {(paintCounts.enf > 0 || paintCounts.blk > 0) && (
+                  <span className="px-1 rounded-full bg-black/25 text-[9px] font-mono">
+                    {paintCounts.enf + paintCounts.blk}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      {/* 1.5.5 Non-Blocking Floating C++ Support Painting Toolbar (Stage 20 Enforcer / Blocker / Smart Fill) */}
+      {isPaintModeOpen && (
+        <div
+          data-testid="floating-support-paint-toolbar"
+          className="absolute top-14 right-2.5 sm:right-16 z-30 w-[min(320px,calc(100vw-20px))] rounded-2xl glass-panel p-3 space-y-2.5 shadow-2xl border border-emerald-500/35 pointer-events-auto animate-in fade-in duration-150"
+        >
+          <div className="flex items-center justify-between border-b studio-border pb-2">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-[11px] font-bold studio-text-primary">
+                Cọ Tô Support C++
+              </span>
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                +{paintCounts.enf} / -{paintCounts.blk}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsPaintModeOpen(false)}
+              className="p-1 rounded-lg studio-text-muted hover:text-[var(--text-primary)] cursor-pointer"
+              title="Đóng chế độ tô vùng đỡ"
+            >
+              <IconClose className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Role Picker: Enforcer / Blocker / Erase */}
+          <div className="grid grid-cols-3 gap-1">
+            <button
+              type="button"
+              data-testid="paint-role-enforcer-btn"
+              onClick={() => setPaintRole('enforcer')}
+              className={`py-1.5 rounded-lg text-[10px] font-bold border transition-all cursor-pointer ${
+                paintRole === 'enforcer'
+                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400'
+                  : 'studio-card studio-text-secondary'
+              }`}
+            >
+              ● Ép Đỡ (Xanh)
+            </button>
+            <button
+              type="button"
+              data-testid="paint-role-blocker-btn"
+              onClick={() => setPaintRole('blocker')}
+              className={`py-1.5 rounded-lg text-[10px] font-bold border transition-all cursor-pointer ${
+                paintRole === 'blocker'
+                  ? 'bg-rose-500/25 text-rose-300 border-rose-400'
+                  : 'studio-card studio-text-secondary'
+              }`}
+            >
+              ✕ Cấm Đỡ (Đỏ)
+            </button>
+            <button
+              type="button"
+              data-testid="paint-role-erase-btn"
+              onClick={() => setPaintRole('erase')}
+              className={`py-1.5 rounded-lg text-[10px] font-bold border transition-all cursor-pointer ${
+                paintRole === 'erase'
+                  ? 'bg-amber-500/25 text-amber-300 border-amber-400'
+                  : 'studio-card studio-text-secondary'
+              }`}
+            >
+              ⌫ Tẩy Sơn
+            </button>
+          </div>
+
+          {/* Tool Picker: Sphere Brush / Smart Fill / Bucket */}
+          <div className="grid grid-cols-3 gap-1 p-0.5 rounded-xl bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
+            {[
+              { id: 'sphere', label: 'Cọ Tròn' },
+              { id: 'smart', label: 'Smart Fill' },
+              { id: 'bucket', label: 'Đổ Vùng' },
+            ].map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setPaintTool(t.id as SupportPaintTool)}
+                className={`py-1 rounded-lg text-[10px] font-semibold cursor-pointer ${
+                  paintTool === t.id ? 'studio-pill-active' : 'studio-pill-inactive'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Brush Radius & Smart Angle */}
+          <div className="grid grid-cols-2 gap-2 text-[10px]">
+            <div className="space-y-1">
+              <div className="flex justify-between studio-text-secondary">
+                <span>Bán kính cọ</span>
+                <strong className="font-mono studio-text-primary">{paintBrushRadius.toFixed(1)}mm</strong>
+              </div>
+              <input
+                type="range"
+                min={1.5}
+                max={18}
+                step={0.5}
+                value={paintBrushRadius}
+                onChange={(e) => setPaintBrushRadius(Number(e.target.value))}
+                className="w-full accent-emerald-500 h-1.5 cursor-pointer"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between studio-text-secondary">
+                <span>Góc Smart Fill</span>
+                <strong className="font-mono studio-text-primary">{paintSmartAngle}°</strong>
+              </div>
+              <input
+                type="range"
+                min={10}
+                max={60}
+                step={5}
+                value={paintSmartAngle}
+                onChange={(e) => setPaintSmartAngle(Number(e.target.value))}
+                className="w-full accent-sky-400 h-1.5 cursor-pointer"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] pt-0.5">
+            <label className="flex items-center gap-1.5 studio-text-secondary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={paintOverhangOnly}
+                onChange={(e) => setPaintOverhangOnly(e.target.checked)}
+                className="accent-emerald-500 rounded"
+              />
+              <span>Chỉ tô mặt Overhang</span>
+            </label>
+
+            <label className="flex items-center gap-1.5 studio-text-secondary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={profile.supportPaintMode === 'paint_only'}
+                onChange={(e) =>
+                  onChangeProfile?.({
+                    supportPaintMode: e.target.checked ? 'paint_only' : 'auto_with_paint',
+                  })
+                }
+                className="accent-sky-400 rounded"
+              />
+              <span>Chỉ đỡ vùng đã tô</span>
+            </label>
+          </div>
+
+          {paintStatusLabel && (
+            <div className="text-[10px] studio-text-muted leading-tight">
+              {paintStatusLabel}
+            </div>
+          )}
+
+          <div className="flex items-center gap-1.5 pt-1 border-t studio-border">
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await clearAllSupportPaint().catch(() => ({ enf: 0, blk: 0 }));
+                setPaintCounts(res);
+                applyFlatTrisToMesh(paintEnfMeshRef.current, new Float32Array(0));
+                applyFlatTrisToMesh(paintBlkMeshRef.current, new Float32Array(0));
+                applyFlatTrisToMesh(paintFillPreviewMeshRef.current, new Float32Array(0));
+                setPaintSliceTrigger((v) => v + 1);
+              }}
+              className="px-2.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-bold cursor-pointer"
+            >
+              Xóa Hết Sơn
+            </button>
+            <button
+              type="button"
+              data-testid="paint-apply-reslice-btn"
+              onClick={() => {
+                if (profile.supportMode === 'none') {
+                  onChangeProfile?.({ supportMode: 'tree' });
+                }
+                setPaintSliceTrigger((v) => v + 1);
+              }}
+              className="flex-1 py-1.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[10px] cursor-pointer shadow-xs"
+            >
+              ↻ Áp Dụng Sơn &amp; Sinh Tree Support
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 1.6. Non-Blocking Floating Tree Support Live-Preview Quick Controller (Không che khuất mẫu 3D ở giữa bàn in!) */}
       {isTreeQuickPopoverOpen && (
@@ -2245,6 +2776,48 @@ export function PrintSimulatorViewport({
                   className="w-full accent-emerald-500 cursor-pointer h-1.5"
                 />
 
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center justify-between text-[9.5px] studio-text-secondary">
+                      <span>Khe hở XY</span>
+                      <span className="font-mono font-bold studio-text-primary">
+                        {(profile.supportXyDistanceMm ?? 0.35).toFixed(2)}mm
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.2}
+                      max={0.8}
+                      step={0.05}
+                      value={profile.supportXyDistanceMm ?? 0.35}
+                      onChange={(e) =>
+                        onChangeProfile?.({ supportXyDistanceMm: Number(e.target.value) })
+                      }
+                      className="w-full accent-emerald-500 cursor-pointer h-1.5"
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <div className="flex items-center justify-between text-[9.5px] studio-text-secondary">
+                      <span>Mở rộng vùng đỡ</span>
+                      <span className="font-mono font-bold studio-text-primary">
+                        {(profile.supportExpansionMm ?? 0).toFixed(1)}mm
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-0.5}
+                      max={1.5}
+                      step={0.25}
+                      value={profile.supportExpansionMm ?? 0}
+                      onChange={(e) =>
+                        onChangeProfile?.({ supportExpansionMm: Number(e.target.value) })
+                      }
+                      className="w-full accent-emerald-500 cursor-pointer h-1.5"
+                    />
+                  </div>
+                </div>
+
                 <label className="flex items-center justify-between gap-2 text-[10px] studio-text-secondary cursor-pointer pt-0.5">
                   <span>Chỉ mọc từ mặt bàn in (không sẹo mẫu)</span>
                   <input
@@ -2256,6 +2829,17 @@ export function PrintSimulatorViewport({
                     className="accent-emerald-500 rounded cursor-pointer"
                   />
                 </label>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPaintModeOpen(true);
+                    onSetTreeQuickPopoverOpen?.(false);
+                  }}
+                  className="w-full py-1.5 px-2.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-400 text-[10px] font-bold cursor-pointer transition-colors"
+                >
+                  ✎ Mở Cọ Tô Vùng Đỡ / Cấm Đỡ C++ →
+                </button>
               </div>
             </>
           )}
@@ -3083,10 +3667,12 @@ function updateSupportStructures(
   modelPath?: string,
   clippingPlane?: THREE.Plane,
   readyOrcaBundle?: IOrcaWasmSliceBundle | null,
-  isSameGeometry: boolean = false
+  isSameGeometry: boolean = false,
+  supportHostParent?: THREE.Object3D
 ): THREE.Group | null {
-  const disposeSupportGroup = (grp: THREE.Object3D) => {
-    parent.remove(grp);
+  const supHost = supportHostParent || parent;
+  const disposeSupportGroup = (grp: THREE.Object3D, host: THREE.Object3D = parent) => {
+    host.remove(grp);
     grp.traverse((child) => {
       if (
         child instanceof THREE.Mesh ||
@@ -3101,10 +3687,10 @@ function updateSupportStructures(
   };
 
   const existingBrim = parent.getObjectByName('brim_skirt_mesh');
-  if (existingBrim) disposeSupportGroup(existingBrim);
+  if (existingBrim) disposeSupportGroup(existingBrim, parent);
 
   const existingRaft = parent.getObjectByName('raft_platform_mesh');
-  if (existingRaft) disposeSupportGroup(existingRaft);
+  if (existingRaft) disposeSupportGroup(existingRaft, parent);
 
   geometry.computeBoundingBox();
   const bbox = geometry.boundingBox || new THREE.Box3();
@@ -3193,11 +3779,12 @@ function updateSupportStructures(
     });
   };
 
-  const existingSupport = (parent.getObjectByName('support_structures_group') ||
-    parent.getObjectByName('bambu_tree_support_group')) as THREE.Group | undefined;
+  const existingSupport = (supHost.getObjectByName('support_structures_group') ||
+    supHost.getObjectByName('bambu_tree_support_group') ||
+    parent.getObjectByName('support_structures_group')) as THREE.Group | undefined;
 
   if (profile.supportMode === 'none') {
-    if (existingSupport) disposeSupportGroup(existingSupport);
+    if (existingSupport) disposeSupportGroup(existingSupport, existingSupport.parent || supHost);
     return null;
   }
 
@@ -3206,7 +3793,7 @@ function updateSupportStructures(
     pathStr.startsWith('bambu-gcode-') || pathStr.startsWith('bambu-native-');
 
   if (isExplicitBambuGcode) {
-    if (existingSupport) disposeSupportGroup(existingSupport);
+    if (existingSupport) disposeSupportGroup(existingSupport, existingSupport.parent || parent);
     const supportGroup = new THREE.Group();
     supportGroup.name = 'support_structures_group';
     supportGroup.visible = visible;
@@ -3230,13 +3817,13 @@ function updateSupportStructures(
   }
 
   if (existingSupport) {
-    disposeSupportGroup(existingSupport);
+    disposeSupportGroup(existingSupport, existingSupport.parent || supHost);
   }
 
   const supportGroup = new THREE.Group();
   supportGroup.name = 'support_structures_group';
   supportGroup.visible = visible;
-  parent.add(supportGroup);
+  supHost.add(supportGroup);
 
   if (readyOrcaBundle && readyOrcaBundle.supportData.segments.length > 0) {
     const orcaTreeMesh = buildNativeSupportMesh(readyOrcaBundle.supportData);

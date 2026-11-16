@@ -58,10 +58,11 @@ export async function executeNeonQuery<T = any>(
   }
 
   try {
-    // @neondatabase/serverless query
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    const result = await sql(queryText, params);
+    // @neondatabase/serverless v1.2+ requires sql.query(text, params) for parameterized calls
+    const sqlAny = sql as any;
+    const result = typeof sqlAny.query === 'function'
+      ? await sqlAny.query(queryText, params)
+      : await sqlAny(queryText, params);
     return {
       success: true,
       data: result as T[],

@@ -47,9 +47,8 @@ import {
   saveGeminiModel,
 } from '@/services/geminiSupportService';
 import {
-  getLearnedDefectRules,
-  setLearnedDefectRules,
-  ICustomDefectKnowledgeRule,
+  fetchLearnedDefectRulesFromDB,
+  setRulePersonalSandbox,
 } from '@/services/preflightAnalyzer';
 
 interface BambuSupportAIAssistantModalProps {
@@ -350,39 +349,52 @@ export function BambuSupportAIAssistantModal({
 
   const handleSaveDiagnosisToKnowledgeDB = async () => {
     if (!diagnosisResult) return;
-    const newRule: ICustomDefectKnowledgeRule = {
-      id: `ai-diag-${Date.now()}`,
-      title: diagnosisResult.defectTitle,
-      category: 'simulator_defect_learning',
-      defectType: diagnosisResult.defectCategory,
-      severity: diagnosisResult.severity === 'critical' ? 'critical' : 'high',
-      triggerCondition: `${profile.material} • ${currentModel.name}`,
-      content: `${diagnosisResult.rootCauseAnalysis} Khắc phục: ${diagnosisResult.engineeringFixSteps.join(' ')}`,
-      tags: [profile.material, diagnosisResult.defectCategory, 'AI Vision Verified'],
-      autoFixPatch: diagnosisResult.recommendedPatch,
-      submittedBy: 'AI Consultant Copilot',
-      isVerified: true,
-      updatedAt: new Date().toISOString().split('T')[0],
-    };
-
-    const existing = getLearnedDefectRules();
-    setLearnedDefectRules([newRule, ...existing]);
+    const solutionText = `${diagnosisResult.rootCauseAnalysis} Khắc phục: ${diagnosisResult.engineeringFixSteps.join(' ')}`;
 
     try {
-      await fetch('/api/knowledge', {
+      const res = await fetch('/api/knowledge', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...newRule,
-          solutionText: newRule.content,
+          title: diagnosisResult.defectTitle,
+          category: 'simulator_defect_learning',
+          defectType: diagnosisResult.defectCategory,
+          severity: diagnosisResult.severity === 'critical' ? 'critical' : 'high',
+          triggerCondition: {
+            description: `${profile.material} • ${currentModel.name}`,
+          },
+          solutionText,
           problemSymptom: diagnosisResult.visualSymptoms.join('; '),
           rootCause: diagnosisResult.rootCauseAnalysis,
+          tags: [profile.material, diagnosisResult.defectCategory, 'AI Vision'],
+          autoFixPatch: diagnosisResult.recommendedPatch,
         }),
       });
-    } catch {}
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.entry) {
+        showQuickAppliedToast(
+          res.status === 401
+            ? 'Vui lòng đăng nhập tài khoản Laymor3D để lưu quy tắc vào Database!'
+            : data?.error || 'Không thể lưu ca bệnh vào Database.'
+        );
+        return;
+      }
 
-    setSavedToKnowledgeDB(true);
-    showQuickAppliedToast('Đã lưu ca bệnh vào Kho Tri Thức Lỗi (Defect Knowledge DB)!');
+      if (!data.entry.isVerified && data.entry.id) {
+        setRulePersonalSandbox(data.entry.id, true);
+      }
+      await fetchLearnedDefectRulesFromDB();
+      setSavedToKnowledgeDB(true);
+      showQuickAppliedToast(
+        data.message ||
+          (data.entry.isVerified
+            ? 'Đã lưu & duyệt ca bệnh lên Database!'
+            : 'Đã gửi ca bệnh vào hàng chờ duyệt + BẬT Sandbox cá nhân!')
+      );
+    } catch (err: any) {
+      showQuickAppliedToast('Lỗi kết nối khi lưu tri thức: ' + (err?.message || 'Network error'));
+    }
   };
 
   if (!isOpen) return null;

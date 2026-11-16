@@ -291,6 +291,14 @@ export interface ISimulationProfile {
   supportBranchAngle?: number;       // 25 -> 65 deg (tree_support_branch_angle)
   supportInterfaceLayers?: number;   // 0 -> 5 layers
   supportOnBuildPlateOnly?: boolean; // Chỉ mọc từ bàn in
+  supportOverhangMinArea?: number;   // mm² min overhang before support (support_overhang_min_area)
+  supportExpansionMm?: number;       // mm support region expansion (support_expansion)
+  supportXyDistanceMm?: number;      // mm XY clearance from model walls (support_xy_distance)
+  supportInterfaceSpacingMm?: number;// mm interface pattern spacing (0 = solid)
+  treeTopRatePercent?: number;       // % top contact density (tree_support_top_rate)
+  treeBranchDiameterAngleDeg?: number; // ° trunk flaring rate (tree_support_branch_diameter_angle)
+  supportPaintMode?: 'auto_with_paint' | 'paint_only'; // support_auto: true | false
+  fastPreviewMode?: boolean;         // Opt-in fast adaptive layer stretch for preview only
   brimEnabled: boolean;
   brimType?: BrimTypeMode;
   brimWidthMm: number;               // 0 -> 15 mm

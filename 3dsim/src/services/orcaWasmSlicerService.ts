@@ -14,6 +14,11 @@ import {
 import type { ISimulationProfile } from '@/types/simulator';
 import type { INativeSupportData, INativeSupportSegment } from './nativeSupportLoader';
 import type { FilamentColorScheme, IActiveMoveTelemetry } from './volumetricFilamentRenderer';
+import {
+  computeOpenEdgeRatio,
+  simplifyMeshQemOverhangAware,
+  repairBrokenSoupToWatertight,
+} from './meshPrepEngine';
 
 export interface IOrcaWasmSliceStats {
   totalLayers: number;
@@ -25,10 +30,15 @@ export interface IOrcaWasmSliceStats {
   supportSegmentsCount: number;
   modelSegmentsCount: number;
   usedWatertightRepair: boolean;
+  repairMethod?: 'hole_fill' | 'morphological_vox' | 'none';
   simplifiedFromTris: number;
   slicedTris: number;
   elapsedMs: number;
   kernelMode?: 'mt' | 'st';
+  contourEngine?: string;
+  reusedStages?: boolean;
+  effectiveLayerHeight?: number;
+  treeStyle?: string;
 }
 
 export interface IOrcaWasmSliceBundle {
@@ -54,6 +64,18 @@ interface IRawWorkerSliceResult {
   stats: Record<string, unknown>;
 }
 
+interface PreparedMeshCacheEntry {
+  geomHash: string;
+  stlBuffer: ArrayBuffer;
+  yUpPositions: Float32Array;
+  minY: number;
+  modelHeightMm: number;
+  originalTris: number;
+  slicedTris: number;
+  repaired: boolean;
+  repairMethod: 'hole_fill' | 'morphological_vox' | 'none';
+}
+
 let sharedWorker: Worker | null = null;
 let supProgressView: Uint32Array | null = null;
 let cancelFlagView: Uint32Array | null = null;
@@ -63,12 +85,21 @@ let isWarmingUp = false;
 let nextWorkerReqId = 1;
 let activeJobToken = 0;
 let inFlightWorkerPromise: Promise<unknown> | null = null;
+let paintRpcChain: Promise<unknown> = Promise.resolve();
+
+let lastContourStageSignature: string | null = null;
+let cachedPreparedMesh: PreparedMeshCacheEntry | null = null;
+let lastPaintedGeomHash: string | null = null;
+let lastPreparedMinY = 0;
+let paintRevision = 0;
+let lastSlicedPaintRevision = 0;
+let latestPaintCounts = { enf: 0, blk: 0 };
 
 type WorkerMsgListener = (data: Record<string, any>) => void;
 const workerListeners = new Set<WorkerMsgListener>();
 
 const sliceBundleCache = new Map<string, IOrcaWasmSliceBundle>();
-const MAX_CACHE_ENTRIES = 6;
+const MAX_CACHE_ENTRIES = 8;
 
 let latestExportSupportGeom: THREE.BufferGeometry | null = null;
 let latestRealGcode: string | null = null;
@@ -81,7 +112,24 @@ export function getLatestOrcaGcode(): string | null {
   return latestRealGcode;
 }
 
+export function getOrcaPaintStatus() {
+  return {
+    revision: paintRevision,
+    counts: { ...latestPaintCounts },
+    preparedMinY: lastPreparedMinY,
+    preparedGeomHash: lastPaintedGeomHash,
+  };
+}
+
 export function clearOrcaWasmCaches(): void {
+  for (const bundle of sliceBundleCache.values()) {
+    if (bundle.supportExportGeometry && bundle.supportExportGeometry !== latestExportSupportGeom) {
+      bundle.supportExportGeometry.dispose();
+    }
+  }
+  sliceBundleCache.clear();
+  lastContourStageSignature = null;
+  cachedPreparedMesh = null;
   latestExportSupportGeom = null;
   latestRealGcode = null;
 }
@@ -98,6 +146,9 @@ function destroySharedWorker(): void {
   supProgressView = null;
   cancelFlagView = null;
   inFlightWorkerPromise = null;
+  lastContourStageSignature = null;
+  lastPaintedGeomHash = null;
+  latestPaintCounts = { enf: 0, blk: 0 };
   workerListeners.clear();
 }
 
@@ -311,14 +362,17 @@ function executeRawWorkerSlice(
     };
 
     workerListeners.add(onMsg);
+    const stlCopy = stlBuffer.slice(0);
+    const useGpuContour =
+      loadedKernelMode === 'st' && !(Number(kernelParams.reuse_stages || 0) >= 2);
     w.postMessage(
       {
-        stl: stlBuffer,
+        stl: stlCopy,
         params: JSON.stringify(kernelParams),
-        gpu: false,
+        gpu: useGpuContour,
         requestId,
       },
-      [stlBuffer]
+      [stlCopy]
     );
   });
 
@@ -333,7 +387,75 @@ function executeRawWorkerSlice(
 }
 
 /**
- * Tạo khóa định danh duy nhất cho hình học + thông số cắt lớp
+ * Deterministic fast geometry signature so re-cloned transformed meshes keep hitting stage/bundle caches.
+ */
+export function computeGeometryHash(geometry: THREE.BufferGeometry): string {
+  geometry.computeBoundingBox();
+  const pos = geometry.getAttribute('position');
+  const vCount = pos ? pos.count : 0;
+  const idx = geometry.getIndex();
+  const idxCount = idx ? idx.count : vCount;
+  const bb = geometry.boundingBox;
+
+  let hash = 2166136261 >>> 0;
+  const mix = (n: number) => {
+    const q = Math.round(n * 1000);
+    hash ^= q & 0xff;
+    hash = Math.imul(hash, 16777619) >>> 0;
+    hash ^= (q >> 8) & 0xff;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  };
+
+  mix(vCount);
+  mix(idxCount);
+  if (bb) {
+    mix(bb.min.x); mix(bb.min.y); mix(bb.min.z);
+    mix(bb.max.x); mix(bb.max.y); mix(bb.max.z);
+  }
+  if (pos && vCount > 0) {
+    const samples = 16;
+    const step = Math.max(1, Math.floor(vCount / samples));
+    for (let i = 0; i < vCount; i += step) {
+      mix(pos.getX(i));
+      mix(pos.getY(i));
+      mix(pos.getZ(i));
+    }
+  }
+  return `${vCount}_${idxCount}_${hash.toString(36)}`;
+}
+
+function buildContourStageSignature(
+  geomHash: string,
+  profile: ISimulationProfile,
+  scale: number = 1,
+  rotation: [number, number, number] = [0, 0, 0]
+): string {
+  return [
+    geomHash,
+    scale.toFixed(3),
+    rotation.map((r) => r.toFixed(3)).join(','),
+    profile.nozzleDiameter ?? 0.4,
+    profile.layerHeight,
+    profile.firstLayerHeight ?? 0.2,
+    profile.lineWidth ?? 0.42,
+    profile.outerWallLineWidth ?? profile.lineWidth ?? 0.42,
+    profile.wallLoops,
+    profile.topShellLayers ?? 4,
+    profile.bottomShellLayers ?? 3,
+    profile.infillDensity,
+    profile.infillType,
+    profile.infillOverlapPercent ?? 15,
+    profile.seamPosition ?? 'aligned',
+    profile.ironingEnabled ? 1 : 0,
+    profile.flowRatio ?? 0.98,
+    profile.brimEnabled ? profile.brimWidthMm : 0,
+    profile.raftLayers ?? 0,
+    profile.fastPreviewMode ? 1 : 0,
+  ].join('|');
+}
+
+/**
+ * Tạo khóa định danh duy nhất cho hình học + thông số cắt lớp + trạng thái tô Support
  */
 export function buildOrcaSliceCacheKey(
   geometry: THREE.BufferGeometry,
@@ -341,23 +463,9 @@ export function buildOrcaSliceCacheKey(
   scale: number = 1,
   rotation: [number, number, number] = [0, 0, 0]
 ): string {
-  const pos = geometry.getAttribute('position');
-  const vCount = pos ? pos.count : 0;
+  const geomHash = computeGeometryHash(geometry);
   return [
-    geometry.uuid,
-    vCount,
-    scale.toFixed(3),
-    rotation.map((r) => r.toFixed(3)).join(','),
-    profile.layerHeight,
-    profile.firstLayerHeight ?? 0.2,
-    profile.lineWidth ?? 0.42,
-    profile.wallLoops,
-    profile.topShellLayers ?? 4,
-    profile.bottomShellLayers ?? 3,
-    profile.infillDensity,
-    profile.infillType,
-    profile.seamPosition ?? 'aligned',
-    profile.ironingEnabled ? 1 : 0,
+    buildContourStageSignature(geomHash, profile, scale, rotation),
     profile.supportMode,
     profile.treeStyle ?? 'organic',
     profile.supportAngleThreshold ?? 30,
@@ -367,522 +475,39 @@ export function buildOrcaSliceCacheKey(
     profile.supportBranchAngle ?? 42,
     profile.supportInterfaceLayers ?? 2,
     profile.supportOnBuildPlateOnly !== false ? 1 : 0,
-    profile.brimEnabled ? profile.brimWidthMm : 0,
-    profile.raftLayers ?? 0,
+    profile.supportOverhangMinArea ?? 0,
+    profile.supportExpansionMm ?? 0,
+    profile.supportXyDistanceMm ?? 0.35,
+    profile.supportInterfaceSpacingMm ?? 0.4,
+    profile.treeTopRatePercent ?? 30,
+    profile.treeBranchDiameterAngleDeg ?? 5,
+    profile.supportPaintMode ?? 'auto_with_paint',
+    `pv:${paintRevision}`,
     profile.printSpeed,
+    profile.outerWallSpeed ?? 0,
     profile.nozzleTemp,
     profile.bedTemp,
   ].join('|');
 }
 
 /**
- * Kiểm tra tỉ lệ cạnh hở (Open Boundary Edges) bằng băm số nguyên tốc độ cao (< 8ms cho 150k tam giác)
- * Phát hiện chính xác các file STL rách mặt nặng như highland_cow.stl (100k tris, hở 84% cạnh)
- */
-function computeOpenEdgeRatio(posArr: Float32Array, maxSampleTris: number = 165000): number {
-  const triCount = Math.floor(posArr.length / 9);
-  if (triCount === 0) return 1;
-  if (triCount > maxSampleTris) {
-    return 0;
-  }
-
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < posArr.length; i += 3) {
-    const x = posArr[i], y = posArr[i + 1], z = posArr[i + 2];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-  }
-
-  const maxSpan = Math.max(1e-3, maxX - minX, maxY - minY, maxZ - minZ);
-  const gridScale = 65536 / maxSpan;
-  const vertMap = new Map<number, number>();
-  const vIdx = new Uint32Array(triCount * 3);
-  let nextId = 1;
-
-  for (let i = 0; i < triCount * 3; i++) {
-    const qx = Math.max(0, Math.round((posArr[i * 3] - minX) * gridScale));
-    const qy = Math.max(0, Math.round((posArr[i * 3 + 1] - minY) * gridScale));
-    const qz = Math.max(0, Math.round((posArr[i * 3 + 2] - minZ) * gridScale));
-    // 17 bits per axis fits safely inside IEEE-754 53-bit exact integer!
-    const key = qx + qy * 131072 + qz * 17179869184;
-    let id = vertMap.get(key);
-    if (id === undefined) {
-      id = nextId++;
-      vertMap.set(key, id);
-    }
-    vIdx[i] = id;
-  }
-
-  const edgeCounts = new Map<number, number>();
-  const stride = nextId + 2;
-  for (let t = 0; t < triCount; t++) {
-    const a = vIdx[t * 3];
-    const b = vIdx[t * 3 + 1];
-    const c = vIdx[t * 3 + 2];
-    if (a === b || b === c || c === a) continue;
-    const e1 = a < b ? a * stride + b : b * stride + a;
-    const e2 = b < c ? b * stride + c : c * stride + b;
-    const e3 = c < a ? c * stride + a : a * stride + c;
-    edgeCounts.set(e1, (edgeCounts.get(e1) || 0) + 1);
-    edgeCounts.set(e2, (edgeCounts.get(e2) || 0) + 1);
-    edgeCounts.set(e3, (edgeCounts.get(e3) || 0) + 1);
-  }
-
-  if (edgeCounts.size === 0) return 1;
-  let openEdges = 0;
-  for (const count of edgeCounts.values()) {
-    if (count === 1) openEdges++;
-  }
-  return openEdges / edgeCounts.size;
-}
-
-/**
- * Rút gọn lưới bảo toàn tính đóng kín tô-pô (Topological Vertex Clustering)
- * Đưa các mẫu điêu khắc ZBrush 500k - 2M tam giác (như Crimson Fox 1.98M tris) về ~68k tam giác kín nước trong ~40ms
- */
-function simplifyClosedMeshTopological(
-  posArr: Float32Array,
-  targetMaxTris: number = 68000
-): Float32Array {
-  const triCount = Math.floor(posArr.length / 9);
-  if (triCount <= targetMaxTris) return posArr;
-
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < posArr.length; i += 3) {
-    const x = posArr[i], y = posArr[i + 1], z = posArr[i + 2];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-  }
-
-  const spanX = Math.max(1, maxX - minX);
-  const spanY = Math.max(1, maxY - minY);
-  const spanZ = Math.max(1, maxZ - minZ);
-  const maxSpan = Math.max(spanX, spanY, spanZ);
-
-  const reductionRatio = Math.sqrt(triCount / targetMaxTris);
-  const gridRes = Math.max(84, Math.min(250, Math.round(205 / Math.max(1, reductionRatio * 0.52))));
-  const invCell = gridRes / maxSpan;
-
-  const clusterMap = new Map<number, number>();
-  let cap = Math.min(triCount, targetMaxTris * 2);
-  let sumX = new Float64Array(cap);
-  let sumY = new Float64Array(cap);
-  let sumZ = new Float64Array(cap);
-  let counts = new Uint32Array(cap);
-  let cCount = 0;
-
-  const vCluster = new Int32Array(triCount * 3);
-  const strideY = gridRes + 4;
-  const strideZ = strideY * strideY;
-
-  for (let i = 0; i < triCount * 3; i++) {
-    const x = posArr[i * 3];
-    const y = posArr[i * 3 + 1];
-    const z = posArr[i * 3 + 2];
-    const gx = Math.max(0, Math.round((x - minX) * invCell));
-    const gy = Math.max(0, Math.round((y - minY) * invCell));
-    const gz = Math.max(0, Math.round((z - minZ) * invCell));
-    const cellKey = gx + gy * strideY + gz * strideZ;
-
-    let cid = clusterMap.get(cellKey);
-    if (cid === undefined) {
-      cid = cCount++;
-      if (cid >= cap) {
-        cap *= 2;
-        const nx = new Float64Array(cap); nx.set(sumX); sumX = nx;
-        const ny = new Float64Array(cap); ny.set(sumY); sumY = ny;
-        const nz = new Float64Array(cap); nz.set(sumZ); sumZ = nz;
-        const nc = new Uint32Array(cap); nc.set(counts); counts = nc;
-      }
-      clusterMap.set(cellKey, cid);
-      sumX[cid] = x;
-      sumY[cid] = y;
-      sumZ[cid] = z;
-      counts[cid] = 1;
-    } else {
-      sumX[cid] += x;
-      sumY[cid] += y;
-      sumZ[cid] += z;
-      counts[cid] += 1;
-    }
-    vCluster[i] = cid;
-  }
-
-  const cx = new Float32Array(cCount);
-  const cy = new Float32Array(cCount);
-  const cz = new Float32Array(cCount);
-  const bedSnapThreshold = minY + 0.12;
-  for (let c = 0; c < cCount; c++) {
-    const inv = 1 / counts[c];
-    cx[c] = sumX[c] * inv;
-    const avgY = sumY[c] * inv;
-    cy[c] = avgY <= bedSnapThreshold ? minY : avgY;
-    cz[c] = sumZ[c] * inv;
-  }
-
-  // Triệt tiêu mặt gấp trùng lặp bằng đối đồng điều dây chuyền đơn hình (Simplicial 2-Chain Cancellation: d(phi#(M)) = phi#(dM) = 0)
-  // Đảm bảo lưới sau khi rút gọn từ 2 triệu tam giác về ~45k tam giác vẫn kín nước 100% và không có mặt chồng chập!
-  const triChain = new Map<bigint, number>();
-  for (let t = 0; t < triCount; t++) {
-    let u = vCluster[t * 3];
-    let v = vCluster[t * 3 + 1];
-    let wIdx = vCluster[t * 3 + 2];
-    if (u === v || v === wIdx || wIdx === u) continue;
-
-    let sign = 1;
-    if (u > v) { const tmp = u; u = v; v = tmp; sign = -sign; }
-    if (v > wIdx) { const tmp = v; v = wIdx; wIdx = tmp; sign = -sign; }
-    if (u > v) { const tmp = u; u = v; v = tmp; sign = -sign; }
-
-    const key = (BigInt(u) << 40n) | (BigInt(v) << 20n) | BigInt(wIdx);
-    const nextNet = (triChain.get(key) || 0) + sign;
-    if (nextNet === 0) {
-      triChain.delete(key);
-    } else {
-      triChain.set(key, nextNet);
-    }
-  }
-
-  let keptTris = 0;
-  for (const net of triChain.values()) {
-    keptTris += Math.abs(net);
-  }
-  if (keptTris < 12) return posArr;
-
-  const out = new Float32Array(keptTris * 9);
-  let w = 0;
-  for (const [key, net] of triChain.entries()) {
-    const u = Number(key >> 40n);
-    const v = Number((key >> 20n) & 0xfffffn);
-    const k = Number(key & 0xfffffn);
-    const copies = Math.abs(net);
-    const bIdx = net > 0 ? v : k;
-    const cIdx = net > 0 ? k : v;
-    for (let rep = 0; rep < copies; rep++) {
-      out[w++] = cx[u]; out[w++] = cy[u]; out[w++] = cz[u];
-      out[w++] = cx[bIdx]; out[w++] = cy[bIdx]; out[w++] = cz[bIdx];
-      out[w++] = cx[cIdx]; out[w++] = cy[cIdx]; out[w++] = cz[cIdx];
-    }
-  }
-  return out;
-}
-
-/**
- * Tái tạo vỏ kín nước bằng Morphological Closing 3D (Dilate R=3 -> Flood-Fill Air -> Erode R=2 + Laplacian Smooth)
- * Hàn kín hoàn hảo các file STL rách mặt nặng như highland_cow.stl (mất 84% tam giác, khe thủng 4-5mm)
- */
-function repairBrokenSoupToWatertight(posArr: Float32Array): Float32Array {
-  const triCount = Math.floor(posArr.length / 9);
-  if (triCount === 0) return posArr;
-
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < posArr.length; i += 3) {
-    const x = posArr[i], y = posArr[i + 1], z = posArr[i + 2];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-  }
-
-  const maxSpan = Math.max(1, maxX - minX, maxY - minY, maxZ - minZ);
-  const voxSize = Math.max(0.85, maxSpan / 68);
-  const pad = 5;
-  const nx = Math.max(8, Math.ceil((maxX - minX) / voxSize) + pad * 2);
-  const ny = Math.max(8, Math.ceil((maxY - minY) / voxSize) + pad * 2);
-  const nz = Math.max(8, Math.ceil((maxZ - minZ) / voxSize) + pad * 2);
-  const ox = minX - voxSize * pad;
-  const oy = minY - voxSize * pad;
-  const oz = minZ - voxSize * pad;
-
-  const totalVox = nx * ny * nz;
-  const seed = new Uint8Array(totalVox);
-  const nxy = nx * ny;
-  const idx = (ix: number, iy: number, iz: number) => ix + nx * iy + nxy * iz;
-
-  for (let t = 0; t < triCount; t++) {
-    const b = t * 9;
-    const ax = posArr[b], ay = posArr[b + 1], az = posArr[b + 2];
-    const bx = posArr[b + 3], by = posArr[b + 4], bz = posArr[b + 5];
-    const cx = posArr[b + 6], cy = posArr[b + 7], cz = posArr[b + 8];
-
-    const edgeLen = Math.max(
-      Math.hypot(bx - ax, by - ay, bz - az),
-      Math.hypot(cx - bx, cy - by, cz - bz),
-      Math.hypot(ax - cx, ay - cy, az - cz)
-    );
-    const steps = Math.max(1, Math.min(14, Math.ceil(edgeLen / (voxSize * 0.7))));
-    for (let u = 0; u <= steps; u++) {
-      for (let v = 0; v <= steps - u; v++) {
-        const wu = u / steps;
-        const wv = v / steps;
-        const ww = 1 - wu - wv;
-        const px = ax * ww + bx * wu + cx * wv;
-        const py = ay * ww + by * wu + cy * wv;
-        const pz = az * ww + bz * wu + cz * wv;
-        const ix = Math.floor((px - ox) / voxSize);
-        const iy = Math.floor((py - oy) / voxSize);
-        const iz = Math.floor((pz - oz) / voxSize);
-        if (ix >= 1 && ix < nx - 1 && iy >= 1 && iy < ny - 1 && iz >= 1 && iz < nz - 1) {
-          seed[idx(ix, iy, iz)] = 1;
-        }
-      }
-    }
-  }
-
-  // Bước 1: Dilate 3 bước 6-connected (bán kính Manhattan 3 voxels ~ 3.5mm, bịt kín khe rách tới 7mm)
-  let curMask: Uint8Array = seed;
-  for (let step = 0; step < 3; step++) {
-    const nextMask = new Uint8Array(curMask);
-    for (let iz = 1; iz < nz - 1; iz++) {
-      for (let iy = 1; iy < ny - 1; iy++) {
-        let k = idx(1, iy, iz);
-        for (let ix = 1; ix < nx - 1; ix++, k++) {
-          if (curMask[k] === 1) {
-            nextMask[k - 1] = 1;
-            nextMask[k + 1] = 1;
-            nextMask[k - nx] = 1;
-            nextMask[k + nx] = 1;
-            nextMask[k - nxy] = 1;
-            nextMask[k + nxy] = 1;
-          }
-        }
-      }
-    }
-    curMask = nextMask;
-  }
-
-  // Bước 2: Flood-fill không khí bên ngoài (state = 2) từ cả 6 mặt biên hộp đệm
-  const work = new Uint8Array(curMask);
-  const queue = new Int32Array(totalVox);
-  let qHead = 0, qTail = 0;
-  const pushAir = (k: number) => {
-    if (work[k] === 0) {
-      work[k] = 2;
-      queue[qTail++] = k;
-    }
-  };
-
-  for (let iz = 0; iz < nz; iz++) {
-    for (let iy = 0; iy < ny; iy++) {
-      pushAir(idx(0, iy, iz));
-      pushAir(idx(nx - 1, iy, iz));
-    }
-  }
-  for (let iz = 0; iz < nz; iz++) {
-    for (let ix = 0; ix < nx; ix++) {
-      pushAir(idx(ix, 0, iz));
-      pushAir(idx(ix, ny - 1, iz));
-    }
-  }
-  for (let iy = 0; iy < ny; iy++) {
-    for (let ix = 0; ix < nx; ix++) {
-      pushAir(idx(ix, iy, 0));
-      pushAir(idx(ix, iy, nz - 1));
-    }
-  }
-
-  while (qHead < qTail) {
-    const cur = queue[qHead++];
-    const iz = Math.floor(cur / nxy);
-    const rem = cur - iz * nxy;
-    const iy = Math.floor(rem / nx);
-    const ix = rem - iy * nx;
-    if (ix > 0) pushAir(cur - 1);
-    if (ix + 1 < nx) pushAir(cur + 1);
-    if (iy > 0) pushAir(cur - nx);
-    if (iy + 1 < ny) pushAir(cur + nx);
-    if (iz > 0) pushAir(cur - nxy);
-    if (iz + 1 < nz) pushAir(cur + nxy);
-  }
-
-  // Mọi ô !== 2 là khối đặc đã lấp đầy ruột
-  let solid = new Uint8Array(totalVox);
-  for (let i = 0; i < totalVox; i++) {
-    if (work[i] !== 2) solid[i] = 1;
-  }
-
-  // Bước 3: Erode 2 bước để trả lại kích thước thực của mẫu (luôn giữ nguyên các ô có tam giác gốc seed === 1)
-  for (let step = 0; step < 2; step++) {
-    const eroded = new Uint8Array(solid);
-    for (let iz = 1; iz < nz - 1; iz++) {
-      for (let iy = 1; iy < ny - 1; iy++) {
-        let k = idx(1, iy, iz);
-        for (let ix = 1; ix < nx - 1; ix++, k++) {
-          if (solid[k] === 1 && seed[k] === 0) {
-            if (
-              solid[k - 1] === 0 ||
-              solid[k + 1] === 0 ||
-              solid[k - nx] === 0 ||
-              solid[k + nx] === 0 ||
-              solid[k - nxy] === 0 ||
-              solid[k + nxy] === 0
-            ) {
-              eroded[k] = 0;
-            }
-          }
-        }
-      }
-    }
-    solid = eroded;
-  }
-
-  // Bước 4: Xuất bề mặt đóng kín trên lưới đỉnh dùng chung + 1 bước làm mượt Laplacian bảo toàn 100% tính kín nước
-  const vMap = new Map<number, number>();
-  const vx: number[] = [];
-  const vy: number[] = [];
-  const vz: number[] = [];
-  const quadIndices: number[] = [];
-  const vStrideY = nx + 2;
-  const vStrideZ = vStrideY * (ny + 2);
-
-  const getCornerVert = (gx: number, gy: number, gz: number): number => {
-    const key = gx + gy * vStrideY + gz * vStrideZ;
-    let vid = vMap.get(key);
-    if (vid === undefined) {
-      vid = vx.length;
-      vMap.set(key, vid);
-      vx.push(ox + gx * voxSize);
-      vy.push(Math.max(minY, oy + gy * voxSize));
-      vz.push(oz + gz * voxSize);
-    }
-    return vid;
-  };
-
-  const isSolid = (ix: number, iy: number, iz: number) => {
-    if (ix < 0 || ix >= nx || iy < 0 || iy >= ny || iz < 0 || iz >= nz) return false;
-    return solid[idx(ix, iy, iz)] === 1;
-  };
-
-  for (let iz = 0; iz < nz; iz++) {
-    for (let iy = 0; iy < ny; iy++) {
-      for (let ix = 0; ix < nx; ix++) {
-        if (!isSolid(ix, iy, iz)) continue;
-        if (!isSolid(ix + 1, iy, iz)) {
-          quadIndices.push(
-            getCornerVert(ix + 1, iy, iz),
-            getCornerVert(ix + 1, iy + 1, iz),
-            getCornerVert(ix + 1, iy + 1, iz + 1),
-            getCornerVert(ix + 1, iy, iz + 1)
-          );
-        }
-        if (!isSolid(ix - 1, iy, iz)) {
-          quadIndices.push(
-            getCornerVert(ix, iy, iz + 1),
-            getCornerVert(ix, iy + 1, iz + 1),
-            getCornerVert(ix, iy + 1, iz),
-            getCornerVert(ix, iy, iz)
-          );
-        }
-        if (!isSolid(ix, iy + 1, iz)) {
-          quadIndices.push(
-            getCornerVert(ix, iy + 1, iz + 1),
-            getCornerVert(ix + 1, iy + 1, iz + 1),
-            getCornerVert(ix + 1, iy + 1, iz),
-            getCornerVert(ix, iy + 1, iz)
-          );
-        }
-        if (!isSolid(ix, iy - 1, iz)) {
-          quadIndices.push(
-            getCornerVert(ix, iy, iz),
-            getCornerVert(ix + 1, iy, iz),
-            getCornerVert(ix + 1, iy, iz + 1),
-            getCornerVert(ix, iy, iz + 1)
-          );
-        }
-        if (!isSolid(ix, iy, iz + 1)) {
-          quadIndices.push(
-            getCornerVert(ix, iy, iz + 1),
-            getCornerVert(ix + 1, iy, iz + 1),
-            getCornerVert(ix + 1, iy + 1, iz + 1),
-            getCornerVert(ix, iy + 1, iz + 1)
-          );
-        }
-        if (!isSolid(ix, iy, iz - 1)) {
-          quadIndices.push(
-            getCornerVert(ix + 1, iy, iz),
-            getCornerVert(ix, iy, iz),
-            getCornerVert(ix, iy + 1, iz),
-            getCornerVert(ix + 1, iy + 1, iz)
-          );
-        }
-      }
-    }
-  }
-
-  if (quadIndices.length < 12) return posArr;
-
-  // Làm mượt 2 vòng Laplacian (alpha = 0.45) trên đồ thị cạnh chia sẻ để khử hoàn toàn bậc thang Voxel (giúp TreeSupport3D chỉ đỡ đúng Overhang thật!)
-  const vCount = vx.length;
-  const sx = Float32Array.from(vx);
-  const sy = Float32Array.from(vy);
-  const sz = Float32Array.from(vz);
-  const sumNx = new Float64Array(vCount);
-  const sumNy = new Float64Array(vCount);
-  const sumNz = new Float64Array(vCount);
-  const deg = new Uint16Array(vCount);
-
-  for (let pass = 0; pass < 2; pass++) {
-    sumNx.fill(0);
-    sumNy.fill(0);
-    sumNz.fill(0);
-    deg.fill(0);
-
-    const addEdge = (a: number, b: number) => {
-      sumNx[a] += sx[b]; sumNy[a] += sy[b]; sumNz[a] += sz[b]; deg[a]++;
-      sumNx[b] += sx[a]; sumNy[b] += sy[a]; sumNz[b] += sz[a]; deg[b]++;
-    };
-    for (let q = 0; q < quadIndices.length; q += 4) {
-      const v0 = quadIndices[q], v1 = quadIndices[q + 1], v2 = quadIndices[q + 2], v3 = quadIndices[q + 3];
-      addEdge(v0, v1);
-      addEdge(v1, v2);
-      addEdge(v2, v3);
-      addEdge(v3, v0);
-    }
-
-    for (let i = 0; i < vCount; i++) {
-      if (deg[i] > 0) {
-        const inv = 1 / deg[i];
-        sx[i] = sx[i] * 0.55 + sumNx[i] * inv * 0.45;
-        const nyVal = sy[i] * 0.55 + sumNy[i] * inv * 0.45;
-        sy[i] = vy[i] <= minY + voxSize * 0.35 ? minY : Math.max(minY, nyVal);
-        sz[i] = sz[i] * 0.55 + sumNz[i] * inv * 0.45;
-      }
-    }
-  }
-
-  const numQuads = quadIndices.length / 4;
-  const out = new Float32Array(numQuads * 18);
-  let w = 0;
-  for (let q = 0; q < quadIndices.length; q += 4) {
-    const v0 = quadIndices[q], v1 = quadIndices[q + 1], v2 = quadIndices[q + 2], v3 = quadIndices[q + 3];
-    out[w++] = sx[v0]; out[w++] = sy[v0]; out[w++] = sz[v0];
-    out[w++] = sx[v1]; out[w++] = sy[v1]; out[w++] = sz[v1];
-    out[w++] = sx[v2]; out[w++] = sy[v2]; out[w++] = sz[v2];
-
-    out[w++] = sx[v0]; out[w++] = sy[v0]; out[w++] = sz[v0];
-    out[w++] = sx[v2]; out[w++] = sy[v2]; out[w++] = sz[v2];
-    out[w++] = sx[v3]; out[w++] = sy[v3]; out[w++] = sz[v3];
-  }
-  return out;
-}
-
-/**
- * Chuyển đổi Three.js BufferGeometry (Y-up) sang Binary STL chuẩn Z-up (x, -z, y) với det = +1
+ * Converts Three.js Y-up BufferGeometry -> Z-up Binary STL (det=+1: x, -z, y - minY),
+ * using hole filling, QEM overhang-preserving decimation (>220k tris), or morphological repair,
+ * and caches the prepared STL + exact Y-up facet positions for 1:1 C++ support painting.
  */
 function buildZUpStlForOrca(
   geometry: THREE.BufferGeometry,
   forceWatertightRepair: boolean = false
-): {
-  stlBuffer: ArrayBuffer;
-  originalTris: number;
-  slicedTris: number;
-  repaired: boolean;
-  modelHeightMm: number;
-} {
+): PreparedMeshCacheEntry {
+  const geomHash = computeGeometryHash(geometry);
+  if (
+    !forceWatertightRepair &&
+    cachedPreparedMesh &&
+    cachedPreparedMesh.geomHash === geomHash
+  ) {
+    return cachedPreparedMesh;
+  }
+
   geometry.computeBoundingBox();
   const minY = geometry.boundingBox?.min.y ?? 0;
   const maxY = geometry.boundingBox?.max.y ?? 20;
@@ -912,28 +537,41 @@ function buildZUpStlForOrca(
   }
 
   const originalTris = Math.floor(rawArr.length / 9);
+  const openRatio = originalTris <= 260000 ? computeOpenEdgeRatio(rawArr) : 0;
   let activeArr: Float32Array = rawArr;
   let repaired = false;
+  let repairMethod: PreparedMeshCacheEntry['repairMethod'] = 'none';
 
-  if (forceWatertightRepair || computeOpenEdgeRatio(activeArr) > 0.22) {
-    if (needsYOffset) {
-      const shifted = new Float32Array(activeArr.length);
-      for (let i = 0; i < activeArr.length; i += 3) {
-        shifted[i] = activeArr[i];
-        shifted[i + 1] = activeArr[i + 1] - minY;
-        shifted[i + 2] = activeArr[i + 2];
-      }
-      activeArr = shifted;
-      needsYOffset = false;
+  const shiftToBedZero = (arr: Float32Array): Float32Array => {
+    if (!needsYOffset) return arr;
+    const shifted = new Float32Array(arr.length);
+    for (let i = 0; i < arr.length; i += 3) {
+      shifted[i] = arr[i];
+      shifted[i + 1] = arr[i + 1] - minY;
+      shifted[i + 2] = arr[i + 2];
     }
-    activeArr = repairBrokenSoupToWatertight(activeArr);
-    repaired = true;
-  } else if (originalTris > 70000) {
-    activeArr = simplifyClosedMeshTopological(activeArr, 62000);
+    needsYOffset = false;
+    return shifted;
+  };
+
+  if (forceWatertightRepair || openRatio > 0.08) {
+    activeArr = shiftToBedZero(activeArr);
+    const repairedRes = repairBrokenSoupToWatertight(activeArr, forceWatertightRepair ? 0.5 : openRatio);
+    if (repairedRes.method !== 'none') {
+      activeArr = repairedRes.posArr;
+      repaired = true;
+      repairMethod = repairedRes.method;
+    }
+  }
+
+  if (Math.floor(activeArr.length / 9) > 220000) {
+    activeArr = shiftToBedZero(activeArr);
+    activeArr = simplifyMeshQemOverhangAware(activeArr, 220000);
   }
 
   const yShift = needsYOffset ? minY : 0;
   const triCount = Math.floor(activeArr.length / 9);
+  const yUpPositions = new Float32Array(triCount * 9);
   const buffer = new ArrayBuffer(84 + triCount * 50);
   const view = new DataView(buffer);
   view.setUint32(80, triCount, true);
@@ -941,10 +579,18 @@ function buildZUpStlForOrca(
   let offset = 84;
   for (let t = 0; t < triCount; t++) {
     const b = t * 9;
-    // Ánh xạ trực giao bảo toàn hướng pháp tuyến: (x, y - minY, z)_Three -> (x, -z, y - minY)_Slicer
-    const ax = activeArr[b], ay = -activeArr[b + 2], az = activeArr[b + 1] - yShift;
-    const bx = activeArr[b + 3], by = -activeArr[b + 5], bz = activeArr[b + 4] - yShift;
-    const cx = activeArr[b + 6], cy = -activeArr[b + 8], cz = activeArr[b + 7] - yShift;
+    const ax3 = activeArr[b], ay3 = activeArr[b + 1] - yShift, az3 = activeArr[b + 2];
+    const bx3 = activeArr[b + 3], by3 = activeArr[b + 4] - yShift, bz3 = activeArr[b + 5];
+    const cx3 = activeArr[b + 6], cy3 = activeArr[b + 7] - yShift, cz3 = activeArr[b + 8];
+
+    yUpPositions[b] = ax3;     yUpPositions[b + 1] = ay3 + minY; yUpPositions[b + 2] = az3;
+    yUpPositions[b + 3] = bx3; yUpPositions[b + 4] = by3 + minY; yUpPositions[b + 5] = bz3;
+    yUpPositions[b + 6] = cx3; yUpPositions[b + 7] = cy3 + minY; yUpPositions[b + 8] = cz3;
+
+    // Three.js Y-up (x, y-minY, z) -> Orca Z-up (x, -z, y-minY)
+    const ax = ax3, ay = -az3, az = ay3;
+    const bx = bx3, by = -bz3, bz = by3;
+    const cx = cx3, cy = -cz3, cz = cy3;
 
     const abx = bx - ax, aby = by - ay, abz = bz - az;
     const acx = cx - ax, acy = cy - ay, acz = cz - az;
@@ -974,7 +620,234 @@ function buildZUpStlForOrca(
     offset += 50;
   }
 
-  return { stlBuffer: buffer, originalTris, slicedTris: triCount, repaired, modelHeightMm };
+  const entry: PreparedMeshCacheEntry = {
+    geomHash,
+    stlBuffer: buffer,
+    yUpPositions,
+    minY,
+    modelHeightMm,
+    originalTris,
+    slicedTris: triCount,
+    repaired,
+    repairMethod,
+  };
+  if (!forceWatertightRepair) {
+    cachedPreparedMesh = entry;
+  }
+  return entry;
+}
+
+// ============================================================================
+// C++ SUPPORT PAINTING WORKER BRIDGE (Stage 20: Enforcer=1, Blocker=2, Erase)
+// ============================================================================
+
+export type SupportPaintRole = 'enforcer' | 'blocker' | 'erase';
+export type SupportPaintTool = 'sphere' | 'circle' | 'smart' | 'bucket' | 'triangle';
+
+function enqueueWorkerRpc<T>(
+  msgBuilder: (reqId: number) => { payload: Record<string, any>; transfer?: Transferable[] },
+  expectedType: string
+): Promise<T> {
+  const job = paintRpcChain.then(async () => {
+    if (inFlightWorkerPromise) {
+      await interruptInFlightWorkerIfNeeded();
+    }
+    const w = getOrCreateWorker();
+    const requestId = nextWorkerReqId++;
+    const { payload, transfer } = msgBuilder(requestId);
+    return new Promise<T>((resolve, reject) => {
+      const cleanup = () => workerListeners.delete(onMsg);
+      const onMsg: WorkerMsgListener = (data) => {
+        if (data.type === 'worker_fatal') {
+          cleanup();
+          reject(new Error(String(data.error || 'Worker fatal error')));
+          return;
+        }
+        if (data.requestId !== requestId) return;
+        if (data.type === 'error') {
+          cleanup();
+          reject(new Error(String(data.error || 'Worker paint RPC failed')));
+          return;
+        }
+        if (data.type === expectedType) {
+          cleanup();
+          resolve(data as unknown as T);
+        }
+      };
+      workerListeners.add(onMsg);
+      w.postMessage({ ...payload, requestId }, transfer || []);
+    });
+  });
+  paintRpcChain = job.catch(() => {});
+  return job;
+}
+
+function threeCoordToOrca(p: [number, number, number], minY: number): [number, number, number] {
+  return [p[0], -p[2], p[1] - minY];
+}
+
+function convertFlatOrcaTrisToThree(flatZUp: Float32Array, minY: number): Float32Array {
+  if (!flatZUp || flatZUp.length === 0) return new Float32Array(0);
+  const out = new Float32Array(flatZUp.length);
+  for (let i = 0; i < flatZUp.length; i += 3) {
+    out[i] = flatZUp[i];
+    out[i + 1] = flatZUp[i + 2] + minY;
+    out[i + 2] = -flatZUp[i + 1];
+  }
+  return out;
+}
+
+export async function prepareModelForSupportPaint(
+  geometry: THREE.BufferGeometry
+): Promise<{
+  facets: number;
+  kept: boolean;
+  minY: number;
+  raycastPositions: Float32Array;
+  geomHash: string;
+}> {
+  const prep = buildZUpStlForOrca(geometry, false);
+  const keepPaint = lastPaintedGeomHash === prep.geomHash;
+  const reply = await enqueueWorkerRpc<{ type: 'prepared'; facets: number; kept: boolean }>(
+    () => {
+      const stlCopy = prep.stlBuffer.slice(0);
+      return {
+        payload: { cmd: 'prepare', stl: stlCopy, keepPaint },
+        transfer: [stlCopy],
+      };
+    },
+    'prepared'
+  );
+  lastPaintedGeomHash = prep.geomHash;
+  lastPreparedMinY = prep.minY;
+  return {
+    facets: reply.facets,
+    kept: reply.kept,
+    minY: prep.minY,
+    raycastPositions: prep.yUpPositions,
+    geomHash: prep.geomHash,
+  };
+}
+
+export async function getSupportPaintOverlay(): Promise<{
+  enf: Float32Array;
+  blk: Float32Array;
+}> {
+  const raw = await enqueueWorkerRpc<{
+    type: 'overlay';
+    enf: Float32Array;
+    blk: Float32Array;
+  }>(() => ({ payload: { cmd: 'overlay' } }), 'overlay');
+
+  return {
+    enf: convertFlatOrcaTrisToThree(raw.enf, lastPreparedMinY),
+    blk: convertFlatOrcaTrisToThree(raw.blk, lastPreparedMinY),
+  };
+}
+
+export async function applySupportPaintStroke(args: {
+  role: SupportPaintRole;
+  tool: SupportPaintTool;
+  facet: number;
+  hitPointThree: [number, number, number];
+  prevPointThree?: [number, number, number];
+  cameraPosThree: [number, number, number];
+  radiusMm: number;
+  smartAngleDeg?: number;
+}): Promise<{
+  enf: number;
+  blk: number;
+  overlayEnf: Float32Array;
+  overlayBlk: Float32Array;
+}> {
+  const [hx, hy, hz] = threeCoordToOrca(args.hitPointThree, lastPreparedMinY);
+  const [cx, cy, cz] = threeCoordToOrca(args.cameraPosThree, lastPreparedMinY);
+  const prevOrca = args.prevPointThree
+    ? threeCoordToOrca(args.prevPointThree, lastPreparedMinY)
+    : null;
+
+  const isFill = args.tool === 'smart' || args.tool === 'bucket' || args.tool === 'triangle';
+  const painted = await enqueueWorkerRpc<{ type: 'painted'; enf: number; blk: number }>(
+    () => ({
+      payload: {
+        cmd: args.role === 'erase' ? 'erase' : 'paint',
+        ...(args.role !== 'erase' ? { state: args.role === 'enforcer' ? 1 : 2 } : {}),
+        ...(isFill ? { tool: args.tool, angle: args.smartAngleDeg ?? 30 } : { cursor: args.tool }),
+        facet: Math.max(0, Math.floor(args.facet)),
+        hx,
+        hy,
+        hz,
+        ...(prevOrca ? { px: prevOrca[0], py: prevOrca[1], pz: prevOrca[2] } : {}),
+        cx,
+        cy,
+        cz,
+        radius: Math.max(0.4, args.radiusMm),
+      },
+    }),
+    'painted'
+  );
+
+  latestPaintCounts = { enf: painted.enf, blk: painted.blk };
+  paintRevision++;
+  const overlay = await getSupportPaintOverlay();
+  return {
+    enf: painted.enf,
+    blk: painted.blk,
+    overlayEnf: overlay.enf,
+    overlayBlk: overlay.blk,
+  };
+}
+
+export async function previewSupportFillUnderCursor(args: {
+  tool: 'smart' | 'bucket' | 'triangle';
+  facet?: number;
+  hitPointThree?: [number, number, number];
+  smartAngleDeg?: number;
+  clear?: boolean;
+}): Promise<Float32Array> {
+  if (args.clear) {
+    await enqueueWorkerRpc<{ type: 'fillPreview'; tris: Float32Array }>(
+      () => ({ payload: { cmd: 'fillPreview', clear: true } }),
+      'fillPreview'
+    );
+    return new Float32Array(0);
+  }
+  const [hx, hy, hz] = args.hitPointThree
+    ? threeCoordToOrca(args.hitPointThree, lastPreparedMinY)
+    : [0, 0, 0];
+  const raw = await enqueueWorkerRpc<{ type: 'fillPreview'; supported: boolean; tris: Float32Array }>(
+    () => ({
+      payload: {
+        cmd: 'fillPreview',
+        tool: args.tool,
+        facet: args.facet ?? 0,
+        hx,
+        hy,
+        hz,
+        angle: args.smartAngleDeg ?? 30,
+      },
+    }),
+    'fillPreview'
+  );
+  return convertFlatOrcaTrisToThree(raw.tris, lastPreparedMinY);
+}
+
+export async function clearAllSupportPaint(): Promise<{ enf: number; blk: number }> {
+  const reply = await enqueueWorkerRpc<{ type: 'painted'; enf: number; blk: number }>(
+    () => ({ payload: { cmd: 'clear' } }),
+    'painted'
+  );
+  latestPaintCounts = { enf: reply.enf, blk: reply.blk };
+  paintRevision++;
+  return latestPaintCounts;
+}
+
+export async function setSupportPaintOverhangFilter(overhangDeg: number): Promise<boolean> {
+  const reply = await enqueueWorkerRpc<{ type: 'paintMode'; ok: boolean }>(
+    () => ({ payload: { cmd: 'paintMode', overhangDeg: Math.max(0, Math.min(89, overhangDeg)) } }),
+    'paintMode'
+  );
+  return reply.ok;
 }
 
 /**
@@ -983,34 +856,34 @@ function buildZUpStlForOrca(
  */
 function mapProfileToOrcaKernelParams(
   profile: ISimulationProfile,
-  modelHeightMm: number
+  modelHeightMm: number,
+  options?: { reuseStages?: number }
 ): {
   kernelParams: Record<string, unknown>;
   effectiveLayerHeight: number;
   effectiveLineWidth: number;
 } {
-  const requestedLayerHeight = profile.layerHeight || 0.2;
-  const isTreeSupport = profile.supportMode === 'tree';
+  const nozzleDiam = Math.max(0.15, profile.nozzleDiameter || 0.4);
+  const maxSafeLayer = Number((nozzleDiam * 0.78).toFixed(3));
+  const requestedLayerHeight = Math.min(maxSafeLayer, Math.max(0.05, profile.layerHeight || 0.2));
 
-  // Với tượng điêu khắc cao (100mm - 250mm), tự động tối ưu bước cắt thích ứng (~360 lớp) để TreeSupport3D hoàn tất trong 2-3.5s và không bao giờ đứt nhánh!
+  // Respect exact user layerHeight unless explicit Fast Preview Mode is turned on
   let effectiveLayerHeight = requestedLayerHeight;
-  if (isTreeSupport && modelHeightMm / requestedLayerHeight > 360) {
-    effectiveLayerHeight = Math.min(0.42, Number((modelHeightMm / 350).toFixed(2)));
-  } else if (!isTreeSupport && modelHeightMm / requestedLayerHeight > 520) {
-    effectiveLayerHeight = Math.min(0.36, Number((modelHeightMm / 500).toFixed(2)));
+  if (profile.fastPreviewMode && modelHeightMm / requestedLayerHeight > 420) {
+    effectiveLayerHeight = Math.min(
+      maxSafeLayer,
+      Math.max(requestedLayerHeight, Number((modelHeightMm / 400).toFixed(2)))
+    );
   }
 
-  const effectiveNozzle = Math.max(
-    profile.nozzleDiameter || 0.4,
-    Number((effectiveLayerHeight * 1.35).toFixed(2))
-  );
+  const effectiveNozzle = nozzleDiam;
   const effectiveLineWidth = Math.max(
-    profile.lineWidth || 0.42,
-    Number((effectiveLayerHeight * 1.15).toFixed(2))
+    profile.lineWidth || Number((nozzleDiam * 1.05).toFixed(2)),
+    Number((nozzleDiam * 0.95).toFixed(2))
   );
   const firstLayerHeight = Math.max(
     effectiveLayerHeight,
-    profile.firstLayerHeight || Math.min(0.28, Number((effectiveLayerHeight * 1.15).toFixed(2)))
+    Math.min(maxSafeLayer, profile.firstLayerHeight || Math.max(0.2, effectiveLayerHeight))
   );
 
   const patternMap: Record<string, string> = {
@@ -1030,7 +903,7 @@ function mapProfileToOrcaKernelParams(
   const treeStyle = profile.treeStyle || 'organic';
   const userBranchDiam = profile.supportBranchDiameter ?? 2.2;
   const userBranchAngle = profile.supportBranchAngle ?? 42;
-  const baseBranchDist = modelHeightMm > 115 ? 4.8 : modelHeightMm > 75 ? 3.2 : 2.2;
+  const baseBranchDist = modelHeightMm > 115 ? 3.8 : modelHeightMm > 75 ? 2.8 : 2.0;
 
   let organicBranchDiam = userBranchDiam;
   let organicTipDiam = 0.8;
@@ -1042,13 +915,13 @@ function mapProfileToOrcaKernelParams(
   if (treeStyle === 'slim') {
     organicBranchDiam = Number(Math.max(1.4, userBranchDiam * 0.72).toFixed(2));
     organicTipDiam = 0.65;
-    organicBranchAngle = Math.min(50, userBranchAngle + 3);
+    organicBranchAngle = Math.min(52, userBranchAngle + 3);
     organicBranchDist = Number((baseBranchDist * 1.25).toFixed(2));
     treeWallCount = 1;
   } else if (treeStyle === 'strong') {
     organicBranchDiam = Number(Math.max(2.8, userBranchDiam * 1.35).toFixed(2));
     organicTipDiam = 1.0;
-    organicBranchAngle = Math.max(35, userBranchAngle - 5);
+    organicBranchAngle = Math.max(32, userBranchAngle - 5);
     organicBranchDist = Number((baseBranchDist * 0.85).toFixed(2));
     treeWallCount = 2;
   } else if (treeStyle === 'hybrid') {
@@ -1060,8 +933,20 @@ function mapProfileToOrcaKernelParams(
     interfaceTopLayers = Math.max(3, interfaceTopLayers);
   }
 
-  // Ngưỡng góc OrcaSlicer / Bambu Studio tính từ mặt bàn nằm ngang (15° = đỡ ít, 30° = chuẩn Bambu, 45° = đỡ kỹ)
-  const thresholdDeg = Math.max(10, Math.min(58, profile.supportAngleThreshold ?? 30));
+  const thresholdDeg = Math.max(10, Math.min(60, profile.supportAngleThreshold ?? 30));
+  const xyDist = profile.supportXyDistanceMm ?? 0.35;
+  const interfaceSpacing = profile.supportInterfaceSpacingMm ?? (treeStyle === 'hybrid' ? 0.25 : 0.4);
+  const topRatePct = profile.treeTopRatePercent ?? 30;
+  const diameterAngleDeg = profile.treeBranchDiameterAngleDeg ?? 5;
+  const minOverhangArea = profile.supportOverhangMinArea ?? 0;
+  const expansionMm = profile.supportExpansionMm ?? 0;
+
+  const upstreamTreeStyleMap: Record<string, string> = {
+    organic: 'organic',
+    slim: 'tree_slim',
+    strong: 'tree_strong',
+    hybrid: 'tree_hybrid',
+  };
 
   const upstreamSettings = {
     printable_area: [
@@ -1083,10 +968,7 @@ function mapProfileToOrcaKernelParams(
     layer_height: effectiveLayerHeight,
     initial_layer_print_height: firstLayerHeight,
     line_width: effectiveLineWidth,
-    outer_wall_line_width: Math.max(
-      profile.outerWallLineWidth || effectiveLineWidth,
-      Number((effectiveLayerHeight * 1.1).toFixed(2))
-    ),
+    outer_wall_line_width: profile.outerWallLineWidth || effectiveLineWidth,
     wall_loops: Math.max(1, profile.wallLoops || 2),
     wall_generator: 'classic',
     top_shell_layers: profile.topShellLayers ?? 4,
@@ -1115,20 +997,27 @@ function mapProfileToOrcaKernelParams(
     enable_support: profile.supportMode !== 'none',
     support_type:
       profile.supportMode === 'tree'
-        ? 'tree(auto)'
-        : profile.supportMode === 'normal'
-        ? 'normal(auto)'
-        : 'normal(auto)',
-    support_style: profile.supportMode === 'tree' ? 'organic' : 'grid',
+        ? profile.supportPaintMode === 'paint_only'
+          ? 'tree(manual)'
+          : 'tree(auto)'
+        : profile.supportPaintMode === 'paint_only'
+          ? 'normal(manual)'
+          : 'normal(auto)',
+    support_style:
+      profile.supportMode === 'tree'
+        ? upstreamTreeStyleMap[treeStyle] || 'organic'
+        : 'grid',
     support_threshold_angle: thresholdDeg,
     support_on_build_plate_only: profile.supportOnBuildPlateOnly !== false,
     support_top_z_distance: profile.supportTopZDistance ?? 0.2,
     support_bottom_z_distance: profile.supportBottomZDistance ?? 0.2,
-    support_object_xy_distance: 0.42,
+    support_object_xy_distance: xyDist,
     support_interface_top_layers: interfaceTopLayers,
+    support_interface_spacing: interfaceSpacing,
+    support_expansion: expansionMm,
     support_remove_small_overhang: true,
     bridge_no_support: false,
-    independent_support_layer_height: true,
+    independent_support_layer_height: false,
     tree_support_branch_diameter: organicBranchDiam,
     tree_support_branch_diameter_organic: organicBranchDiam,
     tree_support_tip_diameter: organicTipDiam,
@@ -1136,8 +1025,10 @@ function mapProfileToOrcaKernelParams(
     tree_support_branch_angle_organic: organicBranchAngle,
     tree_support_branch_distance: organicBranchDist,
     tree_support_branch_distance_organic: organicBranchDist,
+    tree_support_branch_diameter_angle: diameterAngleDeg,
+    tree_support_top_rate: topRatePct,
     tree_support_wall_count: treeWallCount,
-    resolution: modelHeightMm > 95 ? 0.08 : 0.05,
+    resolution: modelHeightMm > 110 ? 0.06 : 0.04,
   } as unknown as SlicerSettings;
 
   const derived = deriveKernelParams(upstreamSettings);
@@ -1146,21 +1037,33 @@ function mapProfileToOrcaKernelParams(
     ...derived,
     auto_center: false,
     wall_generator: 'classic',
-    independent_support_layer_height: true,
+    independent_support_layer_height: false,
     support_remove_small_overhang: true,
     bridge_no_support: false,
     enable_support: profile.supportMode !== 'none',
+    support_auto: profile.supportPaintMode !== 'paint_only',
     support_style: profile.supportMode === 'tree' ? 'tree' : 'grid',
+    tree_style: treeStyle,
     bed_width: 256,
     bed_depth: 256,
     support_threshold_angle: thresholdDeg,
-    support_xy_distance: 0.42,
+    support_xy_distance: xyDist,
+    support_interface_spacing: interfaceSpacing,
+    support_overhang_min_area: minOverhangArea,
+    support_expansion: expansionMm,
+    tree_support_branch_diameter: organicBranchDiam,
     tree_support_branch_diameter_organic: organicBranchDiam,
     tree_support_tip_diameter: organicTipDiam,
+    tree_support_branch_angle: organicBranchAngle,
     tree_support_branch_angle_organic: organicBranchAngle,
+    tree_support_branch_distance: organicBranchDist,
     tree_support_branch_distance_organic: organicBranchDist,
+    tree_support_branch_diameter_angle: diameterAngleDeg,
+    tree_support_top_rate: topRatePct,
     tree_support_wall_count: treeWallCount,
-    resolution: modelHeightMm > 95 ? 0.08 : 0.05,
+    resolution: modelHeightMm > 110 ? 0.06 : 0.04,
+    keep_stages: true,
+    reuse_stages: options?.reuseStages ?? 0,
     gcode_role_tags: true,
     gcode_stats_block: true,
   };
@@ -1378,16 +1281,28 @@ export async function sliceGeometryWithOrcaWasm(
     const prep = buildZUpStlForOrca(geometry, forceRepair);
     if (jobToken !== activeJobToken) return null;
 
-    const mapped = mapProfileToOrcaKernelParams(profile, prep.modelHeightMm);
+    const contourSig = buildContourStageSignature(prep.geomHash, profile);
+    const activePaintRev = paintRevision;
+    const canReuseStages =
+      !forceRepair &&
+      lastContourStageSignature === contourSig &&
+      lastSlicedPaintRevision === activePaintRev &&
+      sharedWorker !== null;
 
-    options?.onProgress?.(
-      18,
-      profile.supportMode === 'tree'
-        ? 'Nhân OrcaSlicer C++ TreeSupport3D đang giải nhánh...'
-        : 'Nhân OrcaSlicer C++ đang cắt lát đường chạy dao...'
-    );
+    const runSliceWithReuse = async (reuseStages: number) => {
+      const mapped = mapProfileToOrcaKernelParams(profile, prep.modelHeightMm, {
+        reuseStages,
+      });
 
-    try {
+      options?.onProgress?.(
+        18,
+        reuseStages >= 2
+          ? 'Tái sử dụng Contour C++ — đang cập nhật Tree Support...'
+          : profile.supportMode === 'tree'
+            ? `Nhân OrcaSlicer C++ TreeSupport (${profile.treeStyle || 'organic'}) đang giải nhánh...`
+            : 'Nhân OrcaSlicer C++ đang cắt lát đường chạy dao...'
+      );
+
       const res = await executeRawWorkerSlice(
         prep.stlBuffer,
         mapped.kernelParams,
@@ -1397,12 +1312,35 @@ export async function sliceGeometryWithOrcaWasm(
           options?.onProgress?.(pct, label);
         }
       );
+      return { res, prep, mapped, reusedStages: reuseStages >= 2, contourSig };
+    };
+
+    try {
+      const attempt = await runSliceWithReuse(canReuseStages ? 2 : 0);
       if (jobToken !== activeJobToken) return null;
-      return { res, prep, mapped };
+      lastContourStageSignature = contourSig;
+      lastSlicedPaintRevision = activePaintRev;
+      return attempt;
     } catch (err) {
       if (jobToken !== activeJobToken) return null;
       const msg = String((err as Error)?.message || err || '').toLowerCase();
       if (msg.includes('cancel')) return null;
+
+      // Self-heal once with clean full slice if stage cache invalidated mid-flight
+      if (canReuseStages) {
+        lastContourStageSignature = null;
+        try {
+          const fallback = await runSliceWithReuse(0);
+          if (jobToken !== activeJobToken) return null;
+          lastContourStageSignature = contourSig;
+          lastSlicedPaintRevision = activePaintRev;
+          return fallback;
+        } catch (err2) {
+          if (jobToken !== activeJobToken) return null;
+          throw err2;
+        }
+      }
+      lastContourStageSignature = null;
       throw err;
     }
   };
@@ -1418,9 +1356,10 @@ export async function sliceGeometryWithOrcaWasm(
     run.mapped.effectiveLineWidth
   );
 
-  // Nếu file STL gốc bị hở cạnh ngầm khiến C++ ra quá ít đường dao, tự động hàn kín Morphological Closing rồi cắt lại!
+  // Auto-heal broken STL manifolds with Watertight repair + clean full slice
   if (extracted.modelSegCount < 25 && !run.prep.repaired) {
     options?.onProgress?.(24, 'Tự động hàn kín mặt hở STL & cắt lại...');
+    lastContourStageSignature = null;
     run = await executeAttempt(true);
     if (!run || jobToken !== activeJobToken) return null;
     layers = run.res.layers || [];
@@ -1434,6 +1373,16 @@ export async function sliceGeometryWithOrcaWasm(
 
   if (extracted.modelSegCount === 0 || layers.length === 0) {
     return null;
+  }
+
+  // Offset support coordinates back if model geometry minY !== 0
+  if (Math.abs(run.prep.minY) > 1e-4 && extracted.supportData.segments.length > 0) {
+    const dy = run.prep.minY;
+    for (const seg of extracted.supportData.segments) {
+      for (let i = 1; i < seg.points.length; i += 3) {
+        seg.points[i] += dy;
+      }
+    }
   }
 
   options?.onProgress?.(92, 'Đang dựng sợi đùn 3D GPU & vỏ Tree Support...');
@@ -1519,10 +1468,15 @@ export async function sliceGeometryWithOrcaWasm(
       supportSegmentsCount: extracted.supportSegCount,
       modelSegmentsCount: extracted.modelSegCount,
       usedWatertightRepair: run.prep.repaired,
+      repairMethod: run.prep.repairMethod,
       simplifiedFromTris: run.prep.originalTris,
       slicedTris: run.prep.slicedTris,
       elapsedMs: Math.round(performance.now() - t0),
       kernelMode: loadedKernelMode,
+      contourEngine: typeof rawStats.contour_engine === 'string' ? rawStats.contour_engine : undefined,
+      reusedStages: run.reusedStages,
+      effectiveLayerHeight: run.mapped.effectiveLayerHeight,
+      treeStyle: profile.supportMode === 'tree' ? profile.treeStyle || 'organic' : 'grid',
     },
   };
 
