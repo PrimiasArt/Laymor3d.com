@@ -84,6 +84,8 @@ interface SimulatorHeaderProps {
   onOpenAuthModal?: () => void;
   orcaStatus?: IOrcaEngineHeaderStatus;
   onQuickGenerateTree?: () => void;
+  uiMode?: 'basic' | 'pro';
+  onChangeUiMode?: (mode: 'basic' | 'pro') => void;
 }
 
 export function SimulatorHeader({
@@ -126,6 +128,8 @@ export function SimulatorHeader({
   onOpenAuthModal,
   orcaStatus,
   onQuickGenerateTree,
+  uiMode = 'pro',
+  onChangeUiMode,
 }: SimulatorHeaderProps) {
   const isStrictAdmin = Boolean(
     currentUser && (currentUser.role === 'admin' || currentUser.username === 'hlcai_admin')
@@ -635,10 +639,14 @@ export function SimulatorHeader({
               className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] transition-all cursor-pointer whitespace-nowrap ${
                 viewMode === 'prepare' ? 'studio-pill-active' : 'studio-pill-inactive font-medium'
               }`}
-              title="Bước 1: Định vị, Xoay góc & Phóng to/thu nhỏ phôi trên bàn in"
+              title={
+                uiMode === 'basic'
+                  ? 'Bước 1: Nhấn nút 360° dưới góc để xoay hoặc đặt mẫu lên bàn in'
+                  : 'Bước 1: Định vị, Xoay góc & Phóng to/thu nhỏ phôi trên bàn in'
+              }
             >
               <IconAxis size={12} />
-              <span>1. Chuẩn Bị</span>
+              <span>{uiMode === 'basic' ? '1. Căn Chỉnh' : '1. Chuẩn Bị'}</span>
             </button>
 
             <button
@@ -648,33 +656,75 @@ export function SimulatorHeader({
               className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] transition-all cursor-pointer whitespace-nowrap ${
                 viewMode === 'cad' ? 'studio-pill-active' : 'studio-pill-inactive font-medium'
               }`}
-              title="Bước 2: Xem phôi 3D hoàn chỉnh kèm Tree Support hữu cơ C++"
+              title={
+                uiMode === 'basic'
+                  ? 'Bước 2: Xem sản phẩm hoàn chỉnh kèm chân đỡ an toàn'
+                  : 'Bước 2: Xem phôi 3D hoàn chỉnh kèm Tree Support hữu cơ C++'
+              }
             >
               <IconCube size={12} />
-              <span>2. Mô Phỏng</span>
+              <span>{uiMode === 'basic' ? '2. Xem In 3D' : '2. Mô Phỏng'}</span>
             </button>
 
-            <button
-              type="button"
-              data-testid="view-mode-filament-btn"
-              onClick={() => onSetViewMode('filament_preview')}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] transition-all cursor-pointer whitespace-nowrap ${
-                viewMode === 'filament_preview'
-                  ? 'studio-pill-active'
-                  : 'studio-pill-inactive font-medium'
-              }`}
-              title="Bước 3: Soi từng đường đùn sợi nhựa 3D (G-code Toolpath GPU thực tế)"
-            >
-              <IconToolpath size={12} />
-              <span>3. Sợi In</span>
-            </button>
+            {uiMode === 'pro' && (
+              <button
+                type="button"
+                data-testid="view-mode-filament-btn"
+                onClick={() => onSetViewMode('filament_preview')}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] transition-all cursor-pointer whitespace-nowrap ${
+                  viewMode === 'filament_preview'
+                    ? 'studio-pill-active'
+                    : 'studio-pill-inactive font-medium'
+                }`}
+                title="Bước 3: Soi từng đường đùn sợi nhựa 3D (G-code Toolpath GPU thực tế)"
+              >
+                <IconToolpath size={12} />
+                <span>3. Sợi In</span>
+              </button>
+            )}
           </div>
         </div>
 
         {/* =====================================================================
-            3. CỤM PHẢI: TRẠNG THÁI C++, AI, CÔNG CỤ, TÀI KHOẢN & XUẤT FILE (1 DÒNG GỌN GÀNG)
+            3. CỤM PHẢI: CHẾ ĐỘ CƠ BẢN/PRO, TREE, AI, CÔNG CỤ, TÀI KHOẢN & XUẤT FILE
            ===================================================================== */}
         <div className="order-2 lg:order-3 flex items-center gap-1 sm:gap-1.5 shrink-0 ml-auto lg:ml-0">
+          {/* 2-Tier UI Mode Switcher: Basic (Non-Expert) vs Pro (Engineering) */}
+          {onChangeUiMode && (
+            <div
+              className="flex items-center p-0.5 rounded-xl studio-card shrink-0"
+              title="Chuyển đổi giữa chế độ Cơ Bản (đơn giản cho người dùng phổ thông) và Chuyên Gia (đầy đủ thông số kỹ thuật)"
+            >
+              <button
+                type="button"
+                data-testid="ui-mode-basic-btn"
+                onClick={() => {
+                  setIsStudioMenuOpen(false);
+                  onChangeUiMode('basic');
+                }}
+                className={`px-2 py-1 rounded-lg text-[11px] transition-all cursor-pointer whitespace-nowrap ${
+                  uiMode === 'basic'
+                    ? 'studio-pill-active font-bold'
+                    : 'studio-pill-inactive font-medium'
+                }`}
+              >
+                Cơ Bản
+              </button>
+              <button
+                type="button"
+                data-testid="ui-mode-pro-btn"
+                onClick={() => onChangeUiMode('pro')}
+                className={`px-2 py-1 rounded-lg text-[11px] transition-all cursor-pointer whitespace-nowrap ${
+                  uiMode === 'pro'
+                    ? 'studio-pill-active font-bold'
+                    : 'studio-pill-inactive font-medium'
+                }`}
+              >
+                Chuyên Gia
+              </button>
+            </div>
+          )}
+
           {/* External 1-Click Tree Support Action & Live C++ Status Button */}
           {orcaStatus?.active ? (
             <button
@@ -682,11 +732,17 @@ export function SimulatorHeader({
               data-testid="header-tree-support-btn"
               onClick={onQuickGenerateTree}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-500 dark:text-emerald-400 text-[11px] font-mono font-bold shrink-0 cursor-pointer"
-              title={orcaStatus.label || 'OrcaSlicer C++ WASM đang dựng Tree Support trực tiếp...'}
+              title={
+                uiMode === 'basic'
+                  ? 'Đang tự động tính chân đỡ an toàn...'
+                  : orcaStatus.label || 'OrcaSlicer C++ WASM đang dựng Tree Support trực tiếp...'
+              }
             >
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
               <span className="whitespace-nowrap">
-                {orcaStatus.percent !== null
+                {uiMode === 'basic'
+                  ? 'Đang tạo...'
+                  : orcaStatus.percent !== null
                   ? hasSupport
                     ? `Tree ${orcaStatus.percent}%`
                     : `Cắt ${orcaStatus.percent}%`
@@ -703,49 +759,63 @@ export function SimulatorHeader({
                   ? 'bg-emerald-500/15 border border-emerald-500/35 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/25'
                   : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-xs'
               }`}
-              title="Sinh ngay Tree Support C++ & Mở bảng chỉnh nhanh xem trước trực tiếp ngoài màn hình 3D"
+              title={
+                uiMode === 'basic'
+                  ? 'Tự động tạo chân đỡ chỗ nhô ra để mẫu in không bị xệ hoặc đổ'
+                  : 'Sinh ngay Tree Support C++ & Mở bảng chỉnh nhanh xem trước trực tiếp ngoài màn hình 3D'
+              }
             >
               <IconSupport size={12} className="shrink-0" />
               <span className="whitespace-nowrap">
-                {hasSupport && showSupport ? 'Tree C++' : 'Sinh Tree'}
+                {uiMode === 'basic'
+                  ? hasSupport && showSupport
+                    ? 'Chân Đỡ: BẬT'
+                    : 'Bật Chân Đỡ'
+                  : hasSupport && showSupport
+                  ? 'Tree C++'
+                  : 'Sinh Tree'}
               </span>
             </button>
           )}
 
-          {/* Quick AI Consultant Button */}
-          <button
-            type="button"
-            data-testid="ai-consultant-header-btn"
-            onClick={onOpenSupportAIModal}
-            aria-label="Mở Chuyên Gia AI Tư Vấn In 3D"
-            className="flex items-center gap-1 px-2 py-1.5 rounded-xl text-[11px] font-semibold studio-gold-badge hover:opacity-90 transition-all cursor-pointer shrink-0"
-            title="Chuyên Gia AI Tư Vấn In 3D (Tối ưu cấu hình, Chat AI & Chẩn đoán ảnh lỗi)"
-          >
-            <IconAngle size={12} className="shrink-0" />
-            <span className="hidden md:inline whitespace-nowrap">Tư Vấn AI</span>
-          </button>
+          {/* Quick AI Consultant Button (Pro mode) */}
+          {uiMode === 'pro' && (
+            <button
+              type="button"
+              data-testid="ai-consultant-header-btn"
+              onClick={onOpenSupportAIModal}
+              aria-label="Mở Chuyên Gia AI Tư Vấn In 3D"
+              className="flex items-center gap-1 px-2 py-1.5 rounded-xl text-[11px] font-semibold studio-gold-badge hover:opacity-90 transition-all cursor-pointer shrink-0"
+              title="Chuyên Gia AI Tư Vấn In 3D (Tối ưu cấu hình, Chat AI & Chẩn đoán ảnh lỗi)"
+            >
+              <IconAngle size={12} className="shrink-0" />
+              <span className="hidden md:inline whitespace-nowrap">Tư Vấn AI</span>
+            </button>
+          )}
 
-          {/* Consolidated Studio & AI Tools Menu */}
-          <button
-            ref={studioBtnRef}
-            type="button"
-            data-testid="studio-tools-menu-btn"
-            onClick={() => setIsStudioMenuOpen((prev) => !prev)}
-            aria-label="Mở bộ công cụ kỹ thuật & AI"
-            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-medium transition-all cursor-pointer shrink-0 ${
-              isStudioMenuOpen
-                ? 'studio-pill-active'
-                : 'studio-card hover:border-[var(--border-strong)] studio-text-primary'
-            }`}
-            title="Mở bộ công cụ Kiểm định, AI 3D, Bambu CLI, Timelapse, Gemini Key & Báo cáo"
-          >
-            <IconSliders size={12} className={isStudioMenuOpen ? '' : 'studio-text-gold'} />
-            <span className="hidden sm:inline whitespace-nowrap">Công Cụ</span>
-            <IconChevronDown
-              size={11}
-              className={`transition-transform ${isStudioMenuOpen ? 'rotate-180' : ''}`}
-            />
-          </button>
+          {/* Consolidated Studio & AI Tools Menu (Pro mode) */}
+          {uiMode === 'pro' && (
+            <button
+              ref={studioBtnRef}
+              type="button"
+              data-testid="studio-tools-menu-btn"
+              onClick={() => setIsStudioMenuOpen((prev) => !prev)}
+              aria-label="Mở bộ công cụ kỹ thuật & AI"
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-medium transition-all cursor-pointer shrink-0 ${
+                isStudioMenuOpen
+                  ? 'studio-pill-active'
+                  : 'studio-card hover:border-[var(--border-strong)] studio-text-primary'
+              }`}
+              title="Mở bộ công cụ Kiểm định, AI 3D, Bambu CLI, Timelapse, Gemini Key & Báo cáo"
+            >
+              <IconSliders size={12} className={isStudioMenuOpen ? '' : 'studio-text-gold'} />
+              <span className="hidden sm:inline whitespace-nowrap">Công Cụ</span>
+              <IconChevronDown
+                size={11}
+                className={`transition-transform ${isStudioMenuOpen ? 'rotate-180' : ''}`}
+              />
+            </button>
+          )}
 
           {/* Dark / Light Mode Toggle */}
           {onToggleTheme && (
@@ -847,7 +917,7 @@ export function SimulatorHeader({
         </div>
       </div>
 
-      {studioDropdownPortal}
+      {uiMode === 'pro' && studioDropdownPortal}
     </header>
   );
 }

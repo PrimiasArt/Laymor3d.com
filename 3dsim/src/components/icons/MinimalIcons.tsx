@@ -1095,3 +1095,40 @@ export const Loader2: React.FC<IconProps> = (props) => (
     <path d="M8 2.25C11.18 2.25 13.75 4.82 13.75 8C13.75 11.18 11.18 13.75 8 13.75C4.82 13.75 2.25 11.18 2.25 8" />
   </BaseSvg>
 );
+
+/** Biểu tượng nút 360° xoay bàn / xoay mẫu / di chuyển mẫu */
+export const Icon360Rotate: React.FC<IconProps> = ({ size = 20, className = '', ...props }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    className={className}
+    {...props}
+  >
+    <path
+      d="M19.8 7.5A9 9 0 1 0 20.8 14"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+    <path
+      d="M20.3 4.2V8.2H16.3"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <text
+      x="11.5"
+      y="14.2"
+      textAnchor="middle"
+      fill="currentColor"
+      fontSize="6.4"
+      fontWeight="800"
+      fontFamily="ui-sans-serif, system-ui, sans-serif"
+    >
+      360°
+    </text>
+  </svg>
+);

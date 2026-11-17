@@ -271,6 +271,32 @@ export default function App() {
     }
     setIsGeminiKeyModalOpen(true);
   }, [isStrictAdmin, showSimToast]);
+
+  const [uiMode, setUiMode] = useState<'basic' | 'pro'>(() => {
+    try {
+      return localStorage.getItem('laymor_3dsim_ui_mode') === 'pro' ? 'pro' : 'basic';
+    } catch {
+      return 'basic';
+    }
+  });
+  const handleSetUiMode = useCallback(
+    (mode: 'basic' | 'pro') => {
+      setUiMode(mode);
+      try {
+        localStorage.setItem('laymor_3dsim_ui_mode', mode);
+      } catch {
+        // Ignore storage errors in sandboxed iframes
+      }
+      if (mode === 'basic') {
+        setIsTreeQuickPopoverOpen(false);
+        setViewMode((prev) => (prev === 'filament_preview' ? 'cad' : prev));
+        showSimToast('Đã chuyển sang chế độ Cơ Bản: thao tác gọn nhẹ, nút 360° khóa chống xoay nhầm.');
+      } else {
+        showSimToast('Đã mở chế độ Chuyên Gia (Pro): đầy đủ công cụ OrcaSlicer C++ & AI.');
+      }
+    },
+    [showSimToast]
+  );
   const [loadedPlates, setLoadedPlates] = useState<ILoadedBambuPlate[]>([]);
   const [activePlateId, setActivePlateId] = useState<number>(1);
   const [hasNativeBambuSupport, setHasNativeBambuSupport] = useState<boolean>(true);
@@ -1581,11 +1607,15 @@ export default function App() {
         orcaStatus={orcaStatus}
         onQuickGenerateTree={() => {
           if (profile.supportMode !== 'tree' || !showSupport) {
-            handleGenerateTreeSupport({ forceReslice: true, openPopover: true });
-          } else {
+            handleGenerateTreeSupport({ forceReslice: true, openPopover: uiMode === 'pro' });
+          } else if (uiMode === 'pro') {
             setIsTreeQuickPopoverOpen((prev) => !prev);
+          } else {
+            setShowSupport((prev) => !prev);
           }
         }}
+        uiMode={uiMode}
+        onChangeUiMode={handleSetUiMode}
       />
 
       {/* Hidden File Input để nạp trực tiếp file .gcode.3mf / .gcode từ Bambu Studio */}
@@ -1620,26 +1650,30 @@ export default function App() {
           onOpenGeminiKeyModal={handleOpenGeminiKeyModal}
           onOpenLocalSlicerModal={() => setIsLocalSlicerModalOpen(true)}
           isAdmin={isStrictAdmin}
+          uiMode={uiMode}
+          onChangeUiMode={handleSetUiMode}
         />
 
         {/* 2.2 Center 3D Viewport Stage + Docked Bottom Action/Timeline Bar */}
         <div className="flex-1 min-w-0 min-h-0 relative flex flex-col overflow-hidden">
           <main className="viewport-stage flex-1 min-h-0 relative w-full overflow-hidden">
-            {/* Simulation Run Log Pill (Docked inside top-left of 3D Stage) */}
-            <SimulationRunLogPanel
-              logs={simulationLogs}
-              isProfileOpen={isProfileOpen}
-              onRecordManualLog={() => recordSimulationLog('Ghi thủ công')}
-              onRestoreProfile={(savedProfile) => {
-                setProfile(savedProfile);
-                recordSimulationLog('Khôi phục Log', savedProfile);
-              }}
-              onClearLogs={() => setSimulationLogs((prev) => (prev.length > 0 ? [prev[0]] : []))}
-              onOpenReportWithLog={(logId) => {
-                setSelectedReportLogId(logId || null);
-                setIsLiveInspectorOpen(true);
-              }}
-            />
+            {/* Simulation Run Log Pill (Pro mode only) */}
+            {uiMode === 'pro' && (
+              <SimulationRunLogPanel
+                logs={simulationLogs}
+                isProfileOpen={isProfileOpen}
+                onRecordManualLog={() => recordSimulationLog('Ghi thủ công')}
+                onRestoreProfile={(savedProfile) => {
+                  setProfile(savedProfile);
+                  recordSimulationLog('Khôi phục Log', savedProfile);
+                }}
+                onClearLogs={() => setSimulationLogs((prev) => (prev.length > 0 ? [prev[0]] : []))}
+                onOpenReportWithLog={(logId) => {
+                  setSelectedReportLogId(logId || null);
+                  setIsLiveInspectorOpen(true);
+                }}
+              />
+            )}
 
             {/* Notification Toast khi nạp mô hình / Bambu Studio CLI đang cắt lát */}
             {uploadSlicingStatus && (
@@ -1703,6 +1737,7 @@ export default function App() {
               onSetTreeQuickPopoverOpen={setIsTreeQuickPopoverOpen}
               onGenerateTreeSupport={handleGenerateTreeSupport}
               onChangeProfile={(updated) => setProfile((prev) => ({ ...prev, ...updated }))}
+              uiMode={uiMode}
             />
           </main>
 
@@ -1713,7 +1748,9 @@ export default function App() {
                 <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs min-w-0">
                   <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg studio-gold-badge font-bold uppercase tracking-wider text-[10px]">
                     <IconAxis className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">Chuẩn Bị Bàn In</span>
+                    <span className="truncate">
+                      {uiMode === 'basic' ? 'Căn Chỉnh Mẫu 3D' : 'Chuẩn Bị Bàn In'}
+                    </span>
                   </span>
                   <span className="text-[var(--text-secondary)] font-mono text-[11px] hidden sm:inline">
                     Kích thước:{' '}
@@ -1723,12 +1760,14 @@ export default function App() {
                       {Math.round(slicingMetrics.boundingBox.dimensions[1])} mm
                     </strong>
                   </span>
-                  <span className="text-[var(--text-muted)] font-mono text-[11px] hidden md:inline">
-                    • Overhang:{' '}
-                    <strong className="text-[var(--accent-gold)]">
-                      {preflightReport.overhangRiskAreaPercent}%
-                    </strong>
-                  </span>
+                  {uiMode === 'pro' && (
+                    <span className="text-[var(--text-muted)] font-mono text-[11px] hidden md:inline">
+                      • Overhang:{' '}
+                      <strong className="text-[var(--accent-gold)]">
+                        {preflightReport.overhangRiskAreaPercent}%
+                      </strong>
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 ml-auto">
@@ -1736,28 +1775,38 @@ export default function App() {
                     type="button"
                     data-testid="prepare-generate-tree-btn"
                     onClick={() =>
-                      handleGenerateTreeSupport({ forceReslice: true, openPopover: true })
+                      handleGenerateTreeSupport({ forceReslice: true, openPopover: uiMode === 'pro' })
                     }
                     className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[11px] sm:text-xs transition-all cursor-pointer shadow-xs"
-                    title="Cố định góc xoay hiện tại, sinh Tree Support C++ & xem trực tiếp trên 3D ngay"
+                    title={
+                      uiMode === 'basic'
+                        ? 'Tự động tạo chân đỡ an toàn cho góc đặt hiện tại'
+                        : 'Cố định góc xoay hiện tại, sinh Tree Support C++ & xem trực tiếp trên 3D ngay'
+                    }
                   >
                     <IconSupport className="w-3.5 h-3.5 shrink-0" />
-                    <span>Sinh Tree Support Ngay</span>
+                    <span>
+                      {uiMode === 'basic' ? 'Tạo Chân Đỡ Tự Động' : 'Sinh Tree Support Ngay'}
+                    </span>
                   </button>
                   <button
                     onClick={() => setViewMode('cad')}
                     className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl studio-cta-primary font-bold text-[11px] sm:text-xs transition-all cursor-pointer"
                   >
                     <IconLayers className="w-3.5 h-3.5 shrink-0" />
-                    <span>Cắt Lớp &amp; Mô Phỏng CAD →</span>
+                    <span>
+                      {uiMode === 'basic' ? 'Xem Mô Phỏng In 3D →' : 'Cắt Lớp & Mô Phỏng CAD →'}
+                    </span>
                   </button>
-                  <button
-                    onClick={() => setViewMode('filament_preview')}
-                    className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl studio-gold-badge hover:opacity-90 font-bold text-[11px] sm:text-xs transition-all cursor-pointer"
-                  >
-                    <IconToolpath className="w-3.5 h-3.5 shrink-0" />
-                    <span>Xem Sợi In Bambu →</span>
-                  </button>
+                  {uiMode === 'pro' && (
+                    <button
+                      onClick={() => setViewMode('filament_preview')}
+                      className="flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl studio-gold-badge hover:opacity-90 font-bold text-[11px] sm:text-xs transition-all cursor-pointer"
+                    >
+                      <IconToolpath className="w-3.5 h-3.5 shrink-0" />
+                      <span>Xem Sợi In Bambu →</span>
+                    </button>
+                  )}
                 </div>
               </div>
             ) : (

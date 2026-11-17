@@ -34,6 +34,8 @@ interface ProfileSettingsPanelProps {
   onOpenGeminiKeyModal?: () => void;
   onOpenLocalSlicerModal?: () => void;
   isAdmin?: boolean;
+  uiMode?: 'basic' | 'pro';
+  onChangeUiMode?: (mode: 'basic' | 'pro') => void;
 }
 
 type SettingsTab = 'basic' | 'support' | 'quality' | 'advanced';
@@ -48,6 +50,8 @@ export function ProfileSettingsPanel({
   onOpenGeminiKeyModal,
   onOpenLocalSlicerModal,
   isAdmin = false,
+  uiMode = 'pro',
+  onChangeUiMode,
 }: ProfileSettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('basic');
 
@@ -176,28 +180,32 @@ export function ProfileSettingsPanel({
               <IconChevronRight size={14} />
             </button>
 
-            <div className="w-5 h-[1px] bg-[var(--border-hairline)] my-0.5" />
+            {uiMode === 'pro' && (
+              <>
+                <div className="w-5 h-[1px] bg-[var(--border-hairline)] my-0.5" />
 
-            {tabs.map((t) => {
-              const isActive = activeTab === t.id;
-              return (
-                <button
-                  type="button"
-                  key={t.id}
-                  onClick={() => {
-                    setActiveTab(t.id);
-                    onToggleOpen();
-                  }}
-                  aria-label={`Mở tab ${t.label}`}
-                  className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
-                    isActive ? 'studio-pill-active' : 'studio-pill-inactive'
-                  }`}
-                  title={`Mở nhanh: ${t.label}`}
-                >
-                  {t.icon}
-                </button>
-              );
-            })}
+                {tabs.map((t) => {
+                  const isActive = activeTab === t.id;
+                  return (
+                    <button
+                      type="button"
+                      key={t.id}
+                      onClick={() => {
+                        setActiveTab(t.id);
+                        onToggleOpen();
+                      }}
+                      aria-label={`Mở tab ${t.label}`}
+                      className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+                        isActive ? 'studio-pill-active' : 'studio-pill-inactive'
+                      }`}
+                      title={`Mở nhanh: ${t.label}`}
+                    >
+                      {t.icon}
+                    </button>
+                  );
+                })}
+              </>
+            )}
           </div>
         ) : (
           <div className="h-full glass-panel lg:rounded-none rounded-r-2xl border-y-0 border-l-0 border-r studio-border overflow-hidden flex flex-col">
@@ -209,11 +217,20 @@ export function ProfileSettingsPanel({
                 </div>
                 <div className="leading-tight min-w-0">
                   <h3 className="text-xs font-bold studio-text-primary tracking-tight truncate">
-                    Thiết Lập Thông Số In
+                    {uiMode === 'basic' ? 'Cấu Hình Nhanh (Cơ Bản)' : 'Thiết Lập Thông Số In'}
                   </h3>
                   <p className="text-[10px] studio-text-secondary font-mono truncate">
-                    {profile.material} • {profile.nozzleDiameter || 0.4}mm • Lớp {profile.layerHeight}mm •{' '}
-                    {profile.supportMode === 'tree' ? `Tree (${profile.treeStyle || 'organic'})` : profile.supportMode === 'normal' ? 'Support Trụ' : 'Không Support'}
+                    {uiMode === 'basic'
+                      ? `${profile.material} • ${
+                          profile.supportMode === 'none' ? 'Không chân đỡ' : 'Có chân đỡ tự động'
+                        }`
+                      : `${profile.material} • ${profile.nozzleDiameter || 0.4}mm • Lớp ${profile.layerHeight}mm • ${
+                          profile.supportMode === 'tree'
+                            ? `Tree (${profile.treeStyle || 'organic'})`
+                            : profile.supportMode === 'normal'
+                            ? 'Support Trụ'
+                            : 'Không Support'
+                        }`}
                   </p>
                 </div>
               </div>
@@ -230,28 +247,207 @@ export function ProfileSettingsPanel({
               </button>
             </div>
 
-            {/* Clean 4-Tab Bambu-Style Segmented Navigation */}
-            <div className="grid grid-cols-4 border-b studio-border bg-[var(--bg-subtle)] p-1.5 gap-1 shrink-0">
-              {tabs.map((t) => {
-                const isActive = activeTab === t.id;
-                return (
+            {uiMode === 'basic' ? (
+              /* Friendly Non-Expert 3-Step Configuration View */
+              <div
+                data-testid="basic-settings-view"
+                className="flex-1 min-h-0 p-3 space-y-3 overflow-y-auto text-xs"
+              >
+                {/* Step 1: Print Goal */}
+                <div className="p-3 rounded-xl studio-card space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold studio-text-primary">
+                      1. Chọn Mục Đích In
+                    </span>
+                    <span className="text-[10px] studio-text-gold font-medium">1-Chạm</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[
+                      {
+                        id: 'figurine',
+                        title: 'Đẹp & Mịn',
+                        sub: 'Trưng bày, ít lộ vân',
+                        isMatch: quickIntents[0].isMatch,
+                        apply: quickIntents[0].apply,
+                      },
+                      {
+                        id: 'balanced',
+                        title: 'Tiêu Chuẩn',
+                        sub: 'Cân bằng đẹp & nhanh',
+                        isMatch: quickIntents[1].isMatch && profile.layerHeight <= 0.22,
+                        apply: quickIntents[1].apply,
+                      },
+                      {
+                        id: 'strong',
+                        title: 'Siêu Bền',
+                        sub: 'Chịu lực, lắp máy',
+                        isMatch: quickIntents[2].isMatch,
+                        apply: quickIntents[2].apply,
+                      },
+                      {
+                        id: 'draft',
+                        title: 'Nhanh Tiết Kiệm',
+                        sub: 'Thử mẫu, ít hao nhựa',
+                        isMatch: profile.layerHeight >= 0.26,
+                        apply: () =>
+                          onChangeProfile({
+                            layerHeight: 0.28,
+                            wallLoops: 2,
+                            infillDensity: 10,
+                            infillType: 'lightning',
+                            supportMode: 'tree',
+                            treeStyle: 'organic',
+                            supportAngleThreshold: 30,
+                            printSpeed: 240,
+                          }),
+                      },
+                    ].map((goal) => (
+                      <button
+                        type="button"
+                        key={goal.id}
+                        onClick={goal.apply}
+                        className={`p-2 rounded-xl text-left transition-all cursor-pointer border ${
+                          goal.isMatch
+                            ? 'studio-pill-active border-[var(--accent-gold)]'
+                            : 'studio-card studio-pill-inactive hover:border-[var(--border-strong)]'
+                        }`}
+                      >
+                        <div className="text-[11px] font-bold leading-tight">{goal.title}</div>
+                        <div className="text-[9px] opacity-80 mt-0.5 leading-tight">{goal.sub}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Step 2: Material & Color */}
+                <div className="p-3 rounded-xl studio-card space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold studio-text-primary">
+                      2. Loại Nhựa & Màu Sắc
+                    </span>
+                    <span className="text-[10px] studio-text-secondary font-mono">
+                      {profile.material}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[
+                      { id: 'PLA' as MaterialType, label: 'PLA Phổ Thông', sub: 'Đẹp mịn, dễ in nhất' },
+                      { id: 'PETG' as MaterialType, label: 'PETG Dẻo Dai', sub: 'Chịu nước & va đập' },
+                      { id: 'ABS' as MaterialType, label: 'ABS Chịu Nhiệt', sub: 'Cứng cáp, kỹ thuật' },
+                      { id: 'TPU' as MaterialType, label: 'TPU Dẻo Cao Su', sub: 'Uốn dẻo đàn hồi' },
+                    ].map((mat) => (
+                      <button
+                        type="button"
+                        key={mat.id}
+                        onClick={() => onChangeProfile({ material: mat.id })}
+                        className={`p-2 rounded-xl text-left transition-all cursor-pointer border ${
+                          profile.material === mat.id
+                            ? 'studio-pill-active border-[var(--accent-gold)]'
+                            : 'studio-card studio-pill-inactive hover:border-[var(--border-strong)]'
+                        }`}
+                      >
+                        <div className="text-[11px] font-bold leading-tight">{mat.label}</div>
+                        <div className="text-[9px] opacity-80 mt-0.5 leading-tight">{mat.sub}</div>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t studio-border">
+                    <span className="text-[10px] studio-text-secondary">Màu nhựa xem trước:</span>
+                    <div className="flex items-center gap-1.5">
+                      {(MATERIAL_PALETTE[profile.material] || MATERIAL_PALETTE.PLA).map((hex) => (
+                        <button
+                          type="button"
+                          key={hex}
+                          onClick={() => onChangeProfile({ materialColor: hex })}
+                          className={`w-5 h-5 rounded-full transition-all cursor-pointer border ${
+                            profile.materialColor === hex
+                              ? 'scale-110 border-[var(--text-primary)] ring-2 ring-[var(--accent-gold)]'
+                              : 'border-black/20 hover:scale-105 opacity-80'
+                          }`}
+                          style={{ backgroundColor: hex }}
+                          title={`Chọn màu ${hex}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Step 3: Auto Support Switch */}
+                <div className="p-3 rounded-xl studio-card space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold studio-text-primary">
+                        3. Chân Đỡ Chỗ Nhô Ra
+                      </div>
+                      <div className="text-[10px] studio-text-secondary mt-0.5 leading-snug">
+                        Tự động chống xệ cho phần treo lơ lửng (khuyên dùng).
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="basic-support-toggle-btn"
+                      onClick={() =>
+                        onChangeProfile(
+                          profile.supportMode === 'none'
+                            ? { supportMode: 'tree', treeStyle: 'organic' }
+                            : { supportMode: 'none' }
+                        )
+                      }
+                      className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer shrink-0 ${
+                        profile.supportMode !== 'none'
+                          ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                          : 'studio-card studio-text-secondary'
+                      }`}
+                    >
+                      {profile.supportMode !== 'none' ? 'ĐANG BẬT' : 'ĐANG TẮT'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Friendly 360 Control Guide */}
+                <div className="p-2.5 rounded-xl border border-amber-500/25 bg-amber-500/10 text-[10px] studio-text-secondary leading-relaxed">
+                  <span className="font-bold text-amber-500 dark:text-amber-300">Mẹo xoay mẫu: </span>
+                  Nhấn nút tròn <span className="font-mono font-bold">360°</span> ở góc dưới màn hình 3D để mở khóa xoay bàn, di chuyển hoặc xoay mẫu. Khi tắt, màn hình được khóa an toàn để không xoay nhầm.
+                </div>
+
+                {/* Upgrade to Pro Mode */}
+                {onChangeUiMode && (
                   <button
                     type="button"
-                    key={t.id}
-                    onClick={() => setActiveTab(t.id)}
-                    className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-xl text-[11px] transition-all cursor-pointer ${
-                      isActive ? 'studio-pill-active' : 'studio-pill-inactive font-medium'
-                    }`}
+                    data-testid="switch-to-pro-btn"
+                    onClick={() => onChangeUiMode('pro')}
+                    className="w-full py-2.5 px-3 rounded-xl studio-card hover:border-[var(--accent-gold)] text-[11px] font-bold studio-text-primary flex items-center justify-between transition-all cursor-pointer"
                   >
-                    {t.icon}
-                    <span className="leading-none whitespace-nowrap">{t.label}</span>
+                    <span>Mở Chế Độ Chuyên Gia (Pro)</span>
+                    <span className="studio-text-gold">Kỹ Thuật →</span>
                   </button>
-                );
-              })}
-            </div>
+                )}
+              </div>
+            ) : (
+              <>
+                {/* Clean 4-Tab Bambu-Style Segmented Navigation */}
+                <div className="grid grid-cols-4 border-b studio-border bg-[var(--bg-subtle)] p-1.5 gap-1 shrink-0">
+                  {tabs.map((t) => {
+                    const isActive = activeTab === t.id;
+                    return (
+                      <button
+                        type="button"
+                        key={t.id}
+                        onClick={() => setActiveTab(t.id)}
+                        className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-xl text-[11px] transition-all cursor-pointer ${
+                          isActive ? 'studio-pill-active' : 'studio-pill-inactive font-medium'
+                        }`}
+                      >
+                        {t.icon}
+                        <span className="leading-none whitespace-nowrap">{t.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
 
-            {/* Scrollable Inspector Body */}
-            <div className="flex-1 min-h-0 p-3 space-y-3 overflow-y-auto text-xs">
+                {/* Scrollable Inspector Body */}
+                <div className="flex-1 min-h-0 p-3 space-y-3 overflow-y-auto text-xs">
               {/* ================= TAB 1: CHẤT LƯỢNG & CƠ BẢN ================= */}
               {activeTab === 'basic' && (
                 <>
@@ -1248,8 +1444,10 @@ export function ProfileSettingsPanel({
                 </div>
               )}
             </div>
-          </div>
+          </>
         )}
+      </div>
+    )}
       </aside>
     </>
   );

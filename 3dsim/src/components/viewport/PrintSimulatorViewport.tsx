@@ -59,6 +59,7 @@ import {
   IconLayers,
   IconNozzle,
   IconSupport,
+  Icon360Rotate,
 } from '@/components/icons/MinimalIcons';
 
 interface PrintSimulatorViewportProps {
@@ -122,6 +123,7 @@ interface PrintSimulatorViewportProps {
     patch?: Partial<ISimulationProfile>;
   }) => void;
   onChangeProfile?: (patch: Partial<ISimulationProfile>) => void;
+  uiMode?: 'basic' | 'pro';
 }
 
 export function PrintSimulatorViewport({
@@ -171,6 +173,7 @@ export function PrintSimulatorViewport({
   onSetTreeQuickPopoverOpen,
   onGenerateTreeSupport,
   onChangeProfile,
+  uiMode = 'pro',
 }: PrintSimulatorViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -217,6 +220,12 @@ export function PrintSimulatorViewport({
 
   const transformControlsRef = useRef<TransformControls | null>(null);
   const [activeGizmoMode, setActiveGizmoMode] = useState<'move' | 'rotate' | 'scale' | null>(null);
+  const [is360ControlActive, setIs360ControlActive] = useState<boolean>(false);
+  const [active360Tool, setActive360Tool] = useState<'orbit' | 'move' | 'rotate'>('orbit');
+  const is360ControlActiveRef = useRef<boolean>(false);
+  is360ControlActiveRef.current = is360ControlActive;
+  const active360ToolRef = useRef<'orbit' | 'move' | 'rotate'>('orbit');
+  active360ToolRef.current = active360Tool;
 
   const onChangeTransformRef = useRef(onChangeTransform);
   onChangeTransformRef.current = onChangeTransform;
@@ -521,6 +530,7 @@ export function PrintSimulatorViewport({
     controls.minDistance = 20;
     controls.maxDistance = 850;
     controls.target.set(0, 18, 0);
+    controls.enabled = false;
     controlsRef.current = controls;
 
     const transformControls = new TransformControls(camera, renderer.domElement);
@@ -534,7 +544,8 @@ export function PrintSimulatorViewport({
 
     transformControls.addEventListener('dragging-changed', (event: any) => {
       if (controlsRef.current) {
-        controlsRef.current.enabled = !event.value;
+        controlsRef.current.enabled =
+          !event.value && is360ControlActiveRef.current && active360ToolRef.current === 'orbit';
       }
     });
 
@@ -1495,25 +1506,73 @@ export function PrintSimulatorViewport({
     }
   }, [modelTransform]);
 
-  // 2.7 Đồng bộ TransformControls Gizmo (Xoay 3D / Di chuyển X-Z)
+  // 2.7 Đồng bộ Khóa An Toàn 360° + OrbitControls + TransformControls Gizmo (Chống xung đột hoàn toàn)
   useEffect(() => {
-    if (!transformControlsRef.current || !modelRootGroupRef.current) return;
-    if (activeGizmoMode === 'rotate') {
-      transformControlsRef.current.setMode('rotate');
-      transformControlsRef.current.showX = true;
-      transformControlsRef.current.showY = true;
-      transformControlsRef.current.showZ = true;
-      transformControlsRef.current.attach(modelRootGroupRef.current);
-    } else if (activeGizmoMode === 'move') {
-      transformControlsRef.current.setMode('translate');
-      transformControlsRef.current.showX = true;
-      transformControlsRef.current.showY = false;
-      transformControlsRef.current.showZ = true;
-      transformControlsRef.current.attach(modelRootGroupRef.current);
-    } else {
-      transformControlsRef.current.detach();
+    const controls = controlsRef.current;
+    const tc = transformControlsRef.current;
+    const modelGroup = modelRootGroupRef.current;
+
+    if (!is360ControlActive || isPaintModeOpen) {
+      if (controls) {
+        controls.enabled = false;
+        controls.enableRotate = false;
+        controls.enablePan = false;
+        controls.enableZoom = false;
+      }
+      if (tc) tc.detach();
+      return;
     }
-  }, [activeGizmoMode]);
+
+    if (active360Tool === 'orbit') {
+      if (controls) {
+        controls.enabled = true;
+        controls.enableRotate = true;
+        controls.enablePan = true;
+        controls.enableZoom = true;
+      }
+      if (tc) tc.detach();
+    } else if (active360Tool === 'move') {
+      if (controls) {
+        controls.enabled = false;
+        controls.enableRotate = false;
+        controls.enablePan = false;
+        controls.enableZoom = false;
+      }
+      if (tc && modelGroup) {
+        tc.setMode('translate');
+        tc.showX = true;
+        tc.showY = false;
+        tc.showZ = true;
+        tc.attach(modelGroup);
+      }
+    } else if (active360Tool === 'rotate') {
+      if (controls) {
+        controls.enabled = false;
+        controls.enableRotate = false;
+        controls.enablePan = false;
+        controls.enableZoom = false;
+      }
+      if (tc && modelGroup) {
+        tc.setMode('rotate');
+        tc.showX = true;
+        tc.showY = true;
+        tc.showZ = true;
+        tc.attach(modelGroup);
+      }
+    }
+  }, [is360ControlActive, active360Tool, isPaintModeOpen]);
+
+  useEffect(() => {
+    if (!is360ControlActive) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIs360ControlActive(false);
+        setActiveGizmoMode(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [is360ControlActive]);
 
   // 3. Cập nhật vị trí Cắt lớp, Đầu in, Gantry, và Toolpath theo Tiến trình
   useEffect(() => {
@@ -1971,7 +2030,7 @@ export function PrintSimulatorViewport({
     return true;
   };
 
-  // Tương tác chuột: Support Painting (khi mở Paint Mode) hoặc Kéo rê mô hình trên bàn in (Bed Dragging)
+  // Tương tác chuột: Support Painting (khi mở Paint Mode) hoặc Di Chuyển Model (chỉ khi bật nút 360° -> Di Chuyển)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !containerRef.current || !cameraRef.current || !modelRootGroupRef.current) return;
 
@@ -1986,6 +2045,14 @@ export function PrintSimulatorViewport({
         isPaintingStrokeRef.current = true;
         if (controlsRef.current) controlsRef.current.enabled = false;
       }
+      return;
+    }
+
+    // Khóa hoàn toàn khi nút 360° đang TẮT hoặc không ở chế độ Di Chuyển
+    if (!is360ControlActive || active360Tool !== 'move') {
+      return;
+    }
+    if ((transformControlsRef.current as any)?.dragging) {
       return;
     }
 
@@ -2030,7 +2097,7 @@ export function PrintSimulatorViewport({
       return;
     }
 
-    if (isDraggingModelRef.current) {
+    if (isDraggingModelRef.current && is360ControlActive && active360Tool === 'move') {
       raycasterRef.current.setFromCamera(mousePosRef.current, cameraRef.current);
       const intersectPoint = new THREE.Vector3();
       raycasterRef.current.ray.intersectPlane(dragPlaneRef.current, intersectPoint);
@@ -2047,23 +2114,32 @@ export function PrintSimulatorViewport({
           position: [clampedX, 0, clampedZ],
         });
       }
-    } else if (modelRootGroupRef.current && containerRef.current) {
-      raycasterRef.current.setFromCamera(mousePosRef.current, cameraRef.current);
-      const hits = raycasterRef.current.intersectObjects(modelRootGroupRef.current.children, true);
-      containerRef.current.style.cursor = hits.length > 0 ? 'grab' : 'default';
+    } else if (containerRef.current) {
+      if (!is360ControlActive) {
+        containerRef.current.style.cursor = 'default';
+      } else if (active360Tool === 'orbit') {
+        containerRef.current.style.cursor = 'grab';
+      } else if (active360Tool === 'move' && modelRootGroupRef.current) {
+        raycasterRef.current.setFromCamera(mousePosRef.current, cameraRef.current);
+        const hits = raycasterRef.current.intersectObjects(modelRootGroupRef.current.children, true);
+        containerRef.current.style.cursor = hits.length > 0 ? 'move' : 'default';
+      } else {
+        containerRef.current.style.cursor = 'default';
+      }
     }
   };
 
   const handlePointerUp = () => {
+    const canOrbit = is360ControlActive && !isPaintModeOpen && active360Tool === 'orbit';
     if (isPaintingStrokeRef.current) {
       isPaintingStrokeRef.current = false;
       prevPaintPointRef.current = null;
-      if (controlsRef.current) controlsRef.current.enabled = true;
+      if (controlsRef.current) controlsRef.current.enabled = canOrbit;
     }
     if (isDraggingModelRef.current) {
       isDraggingModelRef.current = false;
-      if (controlsRef.current) controlsRef.current.enabled = true;
-      if (containerRef.current) containerRef.current.style.cursor = 'grab';
+      if (controlsRef.current) controlsRef.current.enabled = canOrbit;
+      if (containerRef.current) containerRef.current.style.cursor = is360ControlActive ? 'grab' : 'default';
     }
   };
 
@@ -2107,19 +2183,34 @@ export function PrintSimulatorViewport({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        className="w-full h-full cursor-grab active:cursor-grabbing"
+        className={`w-full h-full ${
+          isPaintModeOpen
+            ? 'cursor-crosshair'
+            : is360ControlActive
+              ? 'cursor-grab active:cursor-grabbing'
+              : 'cursor-default'
+        }`}
       />
 
-      {/* 1. Bảng Điều Khiển Đặt Bàn In (Chỉ hiển thị khi ở chế độ Chuẩn Bị) */}
-      {viewMode === 'prepare' && (
+      {/* 1. Bảng Điều Khiển Đặt Bàn In (Chế độ Chuyên Gia khi chuẩn bị) */}
+      {viewMode === 'prepare' && uiMode === 'pro' && (
         <BuildPlateToolbar
           transform={modelTransform}
           dimensions={slicingMetrics.boundingBox.dimensions}
           onChangeTransform={onChangeTransform}
           onResetTransform={onResetTransform}
           onAutoLayFlat={onAutoLayFlat}
-          activeGizmoMode={activeGizmoMode}
-          onToggleGizmoMode={setActiveGizmoMode}
+          activeGizmoMode={is360ControlActive ? (active360Tool === 'orbit' ? null : active360Tool) : activeGizmoMode}
+          onToggleGizmoMode={(mode) => {
+            setActiveGizmoMode(mode);
+            if (mode === 'move' || mode === 'rotate') {
+              setIsPaintModeOpen(false);
+              setIs360ControlActive(true);
+              setActive360Tool(mode);
+            } else {
+              setActive360Tool('orbit');
+            }
+          }}
         />
       )}
 
@@ -2206,7 +2297,7 @@ export function PrintSimulatorViewport({
 
           {/* Viewport Quick Display Controls (Surface PBR, Tree Support, Toolhead, Overhang) */}
           <div className="flex items-center gap-0.5 p-0.5 rounded-full glass-panel shadow-lg shrink-0">
-            {onSetRenderMode && viewMode !== 'filament_preview' && (
+            {uiMode === 'pro' && onSetRenderMode && viewMode !== 'filament_preview' && (
               <>
                 <div className="flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full">
                   <IconLayers size={11} className="studio-text-gold shrink-0" />
@@ -2322,7 +2413,7 @@ export function PrintSimulatorViewport({
               </div>
             )}
 
-            {onToggleToolhead && (
+            {uiMode === 'pro' && onToggleToolhead && (
               <button
                 type="button"
                 data-testid="viewport-toggle-toolhead-btn"
@@ -2337,7 +2428,7 @@ export function PrintSimulatorViewport({
               </button>
             )}
 
-            {onToggleHeatmap && viewMode !== 'filament_preview' && (
+            {uiMode === 'pro' && onToggleHeatmap && viewMode !== 'filament_preview' && (
               <button
                 type="button"
                 data-testid="viewport-toggle-overhang-btn"
@@ -2354,11 +2445,17 @@ export function PrintSimulatorViewport({
               </button>
             )}
 
-            {viewMode !== 'filament_preview' && (
+            {uiMode === 'pro' && viewMode !== 'filament_preview' && (
               <button
                 type="button"
                 data-testid="viewport-toggle-paint-btn"
-                onClick={() => setIsPaintModeOpen((v) => !v)}
+                onClick={() =>
+                  setIsPaintModeOpen((v) => {
+                    const next = !v;
+                    if (next) setIs360ControlActive(false);
+                    return next;
+                  })
+                }
                 className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
                   isPaintModeOpen
                     ? 'bg-emerald-500 text-slate-950 font-bold shadow-xs'
@@ -2952,7 +3049,7 @@ export function PrintSimulatorViewport({
         {/* 3.2 Unified Bambu Studio "Slicing Result" & Live Telemetry Card */}
         {viewMode !== 'prepare' && (
           <>
-            {showSlicingLegend ? (
+            {uiMode === 'pro' && showSlicingLegend ? (
               <div className="w-68 rounded-2xl glass-panel p-3 text-xs space-y-2 animate-in fade-in duration-150 shrink-0">
                 <div className="flex items-center justify-between border-b studio-border pb-1.5">
                   <div className="flex items-center gap-2">
@@ -3140,18 +3237,21 @@ export function PrintSimulatorViewport({
               </div>
             ) : (
               <button
-                onClick={() => setShowSlicingLegend(true)}
+                type="button"
+                onClick={() => uiMode === 'pro' && setShowSlicingLegend(true)}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-xl glass-panel text-[var(--text-primary)] hover:border-[var(--accent-gold)] text-[11px] font-mono font-semibold transition-all cursor-pointer shrink-0 shadow-md"
-                title="Mở bảng chú giải màu & khối lượng nhựa thực tế"
+                title={uiMode === 'pro' ? 'Mở bảng chú giải màu & khối lượng nhựa thực tế' : 'Tổng khối lượng nhựa dự kiến'}
               >
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
                 <span>
                   {totalGrams.toFixed(1)}g
-                  {profile.supportMode !== 'none' ? ` (Tree ${supportGrams}g)` : ''}
+                  {profile.supportMode !== 'none' ? ` (Chân đỡ ${supportGrams}g)` : ''}
                 </span>
-                <span className="text-[9px] text-[var(--accent-gold)] font-sans font-bold">
-                  Chi tiết ▾
-                </span>
+                {uiMode === 'pro' && (
+                  <span className="text-[9px] text-[var(--accent-gold)] font-sans font-bold">
+                    Chi tiết ▾
+                  </span>
+                )}
               </button>
             )}
           </>
@@ -3291,6 +3391,151 @@ export function PrintSimulatorViewport({
           </div>
         </div>
       )}
+
+      {/* 5.5. Nút 360° Hợp Nhất (Click mới mở xoay bàn, di chuyển mẫu, xoay mẫu để tránh conflict) */}
+      <div
+        data-testid="viewport-360-control-dock"
+        className="absolute bottom-3 left-3 z-25 pointer-events-auto flex flex-wrap items-center gap-1.5 select-none max-w-[calc(100%-24px)]"
+      >
+        <button
+          type="button"
+          data-testid="viewport-360-toggle-btn"
+          onClick={() => {
+            setIs360ControlActive((prev) => {
+              const next = !prev;
+              if (next) {
+                setIsPaintModeOpen(false);
+              } else {
+                setActiveGizmoMode(null);
+              }
+              return next;
+            });
+          }}
+          className={`flex items-center gap-1.5 rounded-full transition-all cursor-pointer shadow-xl border ${
+            is360ControlActive
+              ? 'px-3 py-2 bg-emerald-500 text-slate-950 border-emerald-300 font-extrabold ring-4 ring-emerald-400/25'
+              : 'p-2.5 sm:px-3 sm:py-2 glass-panel text-[var(--text-primary)] hover:border-[var(--accent-gold)]'
+          }`}
+          title={
+            is360ControlActive
+              ? 'Đang mở khóa thao tác 3D — Bấm lại để Khóa an toàn'
+              : 'Bấm để mở khóa Xoay bàn 360°, Di chuyển & Xoay mẫu'
+          }
+        >
+          <Icon360Rotate size={22} className="shrink-0" />
+          <span className="text-[11px] font-bold whitespace-nowrap">
+            {is360ControlActive ? 'Đang Mở 360°' : 'Xoay / Chỉnh 3D'}
+          </span>
+        </button>
+
+        {is360ControlActive && (
+          <div className="flex flex-wrap items-center gap-1 p-1 rounded-2xl glass-panel border border-emerald-500/35 shadow-2xl animate-in fade-in duration-150">
+            <button
+              type="button"
+              data-testid="tool-360-orbit-btn"
+              onClick={() => {
+                setActive360Tool('orbit');
+                setActiveGizmoMode(null);
+              }}
+              className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer ${
+                active360Tool === 'orbit'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                  : 'studio-pill-inactive hover:text-[var(--text-primary)]'
+              }`}
+              title="Xoay góc nhìn 360° quanh bàn in & zoom"
+            >
+              Xoay Bàn
+            </button>
+
+            <button
+              type="button"
+              data-testid="tool-360-move-btn"
+              onClick={() => {
+                setActive360Tool('move');
+                setActiveGizmoMode('move');
+              }}
+              className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer ${
+                active360Tool === 'move'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                  : 'studio-pill-inactive hover:text-[var(--text-primary)]'
+              }`}
+              title="Kéo di chuyển vị trí mẫu trên mặt bàn in (đã khóa xoay bàn)"
+            >
+              Di Chuyển
+            </button>
+
+            <button
+              type="button"
+              data-testid="tool-360-rotate-btn"
+              onClick={() => {
+                setActive360Tool('rotate');
+                setActiveGizmoMode('rotate');
+              }}
+              className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer ${
+                active360Tool === 'rotate'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                  : 'studio-pill-inactive hover:text-[var(--text-primary)]'
+              }`}
+              title="Xoay hướng mẫu 3D (đã khóa xoay bàn)"
+            >
+              Xoay Mẫu
+            </button>
+
+            {active360Tool === 'move' && (
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeTransform({ ...modelTransform, position: [0, 0, 0] })
+                }
+                className="px-2 py-1.5 rounded-xl studio-card hover:border-[var(--accent-gold)] text-[10px] font-bold studio-text-gold cursor-pointer"
+                title="Đưa mẫu về chính giữa bàn in"
+              >
+                Về Giữa
+              </button>
+            )}
+
+            {active360Tool === 'rotate' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const r = modelTransform.rotation || [0, 0, 0];
+                    onChangeTransform({
+                      ...modelTransform,
+                      rotation: [r[0] + Math.PI / 2, r[1], r[2]],
+                    });
+                  }}
+                  className="px-2 py-1.5 rounded-xl studio-card hover:border-[var(--accent-gold)] text-[10px] font-bold studio-text-gold cursor-pointer"
+                  title="Lật mẫu +90°"
+                >
+                  +90°
+                </button>
+                <button
+                  type="button"
+                  onClick={onAutoLayFlat}
+                  className="px-2 py-1.5 rounded-xl studio-card hover:border-[var(--accent-gold)] text-[10px] font-bold studio-text-primary cursor-pointer"
+                  title="Tự động đặt phẳng mặt đáy xuống bàn in"
+                >
+                  Đặt Phẳng
+                </button>
+              </>
+            )}
+
+            <button
+              type="button"
+              data-testid="tool-360-lock-btn"
+              onClick={() => {
+                setIs360ControlActive(false);
+                setActiveGizmoMode(null);
+              }}
+              className="px-2 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 text-[10px] font-bold cursor-pointer"
+              title="Khóa lại bàn & mẫu để tránh chạm nhầm (Esc)"
+            >
+              Khóa
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* 6. Real C++ OrcaSlicer WASM Slicing Progress Pill */}
       {slicingProgressPct !== null && (

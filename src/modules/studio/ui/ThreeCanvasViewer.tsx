@@ -25,6 +25,39 @@ interface ThreeCanvasViewerProps {
   onClearCustomModel?: () => void;
 }
 
+function Icon360Studio({ size = 20, className = '' }: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.85}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M15.8 4.4A9 9 0 1 0 19.9 7.8" />
+      <polygon points="16.4 1.9 17.8 5.2 14.3 5.5" fill="currentColor" stroke="none" />
+      <text
+        x="11.6"
+        y="14.6"
+        textAnchor="middle"
+        fontSize="7.4"
+        fontWeight="700"
+        fontFamily="system-ui, -apple-system, sans-serif"
+        fill="currentColor"
+        stroke="none"
+      >
+        360
+      </text>
+      <circle cx="17.8" cy="9.2" r="0.95" fill="none" stroke="currentColor" strokeWidth="0.9" />
+    </svg>
+  );
+}
+
 export function ThreeCanvasViewer({
   options,
   className = '',
@@ -39,11 +72,31 @@ export function ThreeCanvasViewer({
   onClearCustomModel,
 }: ThreeCanvasViewerProps) {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [is360ControlActive, setIs360ControlActive] = useState<boolean>(false);
+  const is360ControlActiveRef = useRef<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+
+  useEffect(() => {
+    is360ControlActiveRef.current = is360ControlActive;
+    if (!is360ControlActive) {
+      isDraggingRef.current = false;
+    }
+  }, [is360ControlActive]);
+
+  useEffect(() => {
+    if (!is360ControlActive) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIs360ControlActive(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [is360ControlActive]);
 
   // Group hierarchy:
   // masterOrbitGroup: Xoay vòng quanh trục Y khi chuột kéo hoặc Tự xoay (Auto-Rotate)
@@ -204,14 +257,15 @@ export function ThreeCanvasViewer({
     modelHeightRef.current = builtHeight;
     meshGroup.add(initialMeshGroup);
 
-    // M. Mouse Orbit Handlers
+    // M. Mouse Orbit Handlers (Gated behind 360° control lock by default)
     const onMouseDown = (e: MouseEvent) => {
+      if (!is360ControlActiveRef.current) return;
       isDraggingRef.current = true;
       prevMousePos.current = { x: e.clientX, y: e.clientY };
     };
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!isDraggingRef.current || !masterOrbitGroupRef.current) return;
+      if (!is360ControlActiveRef.current || !isDraggingRef.current || !masterOrbitGroupRef.current) return;
       const deltaX = e.clientX - prevMousePos.current.x;
       const deltaY = e.clientY - prevMousePos.current.y;
 
@@ -226,6 +280,7 @@ export function ThreeCanvasViewer({
     };
 
     const onWheel = (e: WheelEvent) => {
+      if (!is360ControlActiveRef.current) return;
       e.preventDefault();
       if (!cameraRef.current) return;
       cameraRef.current.position.z = Math.max(3, Math.min(16, cameraRef.current.position.z + e.deltaY * 0.005));
@@ -727,9 +782,94 @@ export function ThreeCanvasViewer({
         )}
       </div>
 
+      {/* Circular 360° Orbit & Angle Lock Control (Safe Locked by Default) */}
+      <div
+        className="absolute bottom-4 left-4 z-20 flex items-center gap-2 select-none"
+        onMouseDown={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          data-testid="studio-360-toggle-btn"
+          onClick={() => setIs360ControlActive((prev) => !prev)}
+          aria-pressed={is360ControlActive}
+          title={
+            is360ControlActive
+              ? 'Chế độ 360° ĐANG MỞ: Kéo chuột để xoay bàn in, lăn chuột để thu/phóng. Nhấn để Khóa lại (Esc).'
+              : 'Mở khóa điều khiển 360° (Khi tắt, bàn in được khóa để không xoay/zoom nhầm khi cuộn trang)'
+          }
+          className={`w-11 h-11 rounded-full flex items-center justify-center shadow-2xl border transition-all cursor-pointer shrink-0 ${
+            is360ControlActive
+              ? 'bg-amber-400 text-slate-950 border-amber-300 ring-4 ring-amber-400/30 scale-105'
+              : 'bg-slate-900/90 hover:bg-slate-800 text-slate-200 border-slate-700 hover:border-amber-400/60 backdrop-blur-md'
+          }`}
+        >
+          <Icon360Studio size={24} />
+        </button>
+
+        {is360ControlActive ? (
+          <div
+            data-testid="studio-360-subbar"
+            className="flex flex-wrap items-center gap-1 p-1 rounded-2xl bg-slate-900/95 backdrop-blur-md border border-slate-700 shadow-2xl text-[11px]"
+          >
+            <span className="px-2 py-1 rounded-xl bg-amber-400/15 text-amber-300 font-bold whitespace-nowrap">
+              Đang mở Xoay Bàn & Thu Phóng
+            </span>
+            <button
+              type="button"
+              data-testid="studio-360-rotate90-btn"
+              onClick={() => {
+                if (orientationGroupRef.current) {
+                  orientationGroupRef.current.rotation.y += Math.PI / 2;
+                }
+              }}
+              className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition-all cursor-pointer whitespace-nowrap"
+              title="Xoay nhanh mô hình thêm 90°"
+            >
+              +90° Mẫu
+            </button>
+            <button
+              type="button"
+              data-testid="studio-360-reset-btn"
+              onClick={() => {
+                if (masterOrbitGroupRef.current) masterOrbitGroupRef.current.rotation.y = 0;
+                if (orientationGroupRef.current) orientationGroupRef.current.rotation.y = 0;
+                if (cameraRef.current) {
+                  cameraRef.current.position.set(0, 3.2, 7.5);
+                  cameraRef.current.lookAt(0, 0, 0);
+                }
+              }}
+              className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition-all cursor-pointer whitespace-nowrap"
+              title="Đặt lại góc nhìn mặc định"
+            >
+              Về Góc Chuẩn
+            </button>
+            <button
+              type="button"
+              data-testid="studio-360-lock-btn"
+              onClick={() => setIs360ControlActive(false)}
+              className="px-2.5 py-1 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 font-bold transition-all cursor-pointer whitespace-nowrap"
+              title="Khóa 360° để tránh chạm nhầm (Phím Esc)"
+            >
+              Khóa (Esc)
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setIs360ControlActive(true)}
+            className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/85 hover:bg-slate-800 border border-slate-700/80 text-[10px] font-semibold text-slate-300 backdrop-blur-md shadow-md cursor-pointer transition-all"
+            title="Nhấn vào nút 360° để mở khóa xoay bàn in và zoom"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            <span>Đã khóa — Bấm 360° để xoay</span>
+          </button>
+        )}
+      </div>
+
       {/* Slicer Toolpath Line Type Legend Overlay */}
       {options.viewMode === 'toolpath' && (
-        <div className="absolute bottom-4 left-4 pointer-events-none p-3 rounded-2xl bg-slate-900/95 backdrop-blur-md border border-slate-800 text-[11px] font-medium space-y-1.5 shadow-2xl z-10 animate-in fade-in duration-200">
+        <div className="absolute bottom-20 left-4 pointer-events-none p-3 rounded-2xl bg-slate-900/95 backdrop-blur-md border border-slate-800 text-[11px] font-medium space-y-1.5 shadow-2xl z-10 animate-in fade-in duration-200">
           <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5 border-b border-slate-800 pb-1">
             <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
             <span>Màu Đường In Slicer (Line Type):</span>
