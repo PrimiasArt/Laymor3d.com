@@ -151,6 +151,11 @@ const DDL_STATEMENTS = [
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
   );`,
   `CREATE INDEX IF NOT EXISTS idx_ai_learning_status ON ai_learning_cases (moderation_status);`,
+  `CREATE TABLE IF NOT EXISTS system_config_store (
+    id VARCHAR(64) PRIMARY KEY,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  );`,
 ];
 
 export async function POST() {

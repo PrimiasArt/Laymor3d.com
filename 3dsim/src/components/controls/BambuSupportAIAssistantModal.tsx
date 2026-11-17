@@ -40,9 +40,9 @@ import {
   diagnosePrintPhotoWithAI,
   PRINT_CONSULT_INTENTS,
   GEMINI_AVAILABLE_MODELS,
-  getSavedGeminiApiKey,
-  saveGeminiApiKey,
-  clearGeminiApiKey,
+  fetchServerGeminiAvailability,
+  fetchAdminServerGeminiConfig,
+  saveAdminServerGeminiConfig,
   getSavedGeminiModel,
   saveGeminiModel,
 } from '@/services/geminiSupportService';
@@ -60,6 +60,7 @@ interface BambuSupportAIAssistantModalProps {
   modelTransform: IModelTransform;
   onChangeProfile: (patch: Partial<ISimulationProfile>) => void;
   onChangeTransform: (newTransform: IModelTransform) => void;
+  isAdmin?: boolean;
 }
 
 const QUICK_CHAT_PROMPTS = [
@@ -107,6 +108,7 @@ export function BambuSupportAIAssistantModal({
   modelTransform,
   onChangeProfile,
   onChangeTransform,
+  isAdmin = false,
 }: BambuSupportAIAssistantModalProps) {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [selectedModelId, setSelectedModelId] = useState(getSavedGeminiModel());
@@ -135,13 +137,23 @@ export function BambuSupportAIAssistantModal({
   const [savedToKnowledgeDB, setSavedToKnowledgeDB] = useState(false);
 
   useEffect(() => {
-    const saved = getSavedGeminiApiKey();
-    if (saved) {
-      setApiKeyInput(saved);
-      setIsSavedKey(true);
+    fetchServerGeminiAvailability().then((status) => {
+      setIsSavedKey(status.available);
+      if (status.preferredModel) setSelectedModelId(status.preferredModel);
+    });
+    if (isAdmin) {
+      fetchAdminServerGeminiConfig().then((cfg) => {
+        if (cfg.ok) {
+          setApiKeyInput(cfg.geminiApiKey || '');
+          setIsSavedKey(Boolean(cfg.geminiApiKey));
+          if (cfg.preferredGeminiModel) setSelectedModelId(cfg.preferredGeminiModel);
+        }
+      });
+    } else {
+      setApiKeyInput('');
+      if (activeTab === 'settings') setActiveTab('recommendation');
     }
-    setSelectedModelId(getSavedGeminiModel());
-  }, []);
+  }, [isOpen, isAdmin]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -206,20 +218,29 @@ export function BambuSupportAIAssistantModal({
     }
   };
 
-  const handleSaveApiKey = () => {
+  const handleSaveApiKey = async () => {
+    if (!isAdmin) return;
     if (apiKeyInput.trim().length > 0) {
-      saveGeminiApiKey(apiKeyInput.trim());
-      saveGeminiModel(selectedModelId);
-      setIsSavedKey(true);
-      handleRunAnalysis(selectedIntent);
+      const res = await saveAdminServerGeminiConfig(apiKeyInput.trim(), selectedModelId);
+      if (res.ok) {
+        saveGeminiModel(selectedModelId);
+        setIsSavedKey(true);
+        showQuickAppliedToast(res.message || '✓ Đã lưu Gemini API lên Server!');
+        handleRunAnalysis(selectedIntent);
+      } else {
+        showQuickAppliedToast(res.error || 'Lỗi lưu khóa API');
+      }
     }
   };
 
-  const handleClearApiKey = () => {
-    clearGeminiApiKey();
-    setApiKeyInput('');
-    setIsSavedKey(false);
-    handleRunAnalysis(selectedIntent);
+  const handleClearApiKey = async () => {
+    if (!isAdmin) return;
+    const res = await saveAdminServerGeminiConfig('', selectedModelId);
+    if (res.ok) {
+      setApiKeyInput('');
+      setIsSavedKey(false);
+      handleRunAnalysis(selectedIntent);
+    }
   };
 
   const handleApplyFullProfile = () => {
@@ -543,17 +564,24 @@ export function BambuSupportAIAssistantModal({
             Mẹo Bambu Studio
           </button>
 
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`ml-auto px-3.5 py-2 text-xs font-semibold rounded-t-lg border-b-2 transition flex items-center gap-1.5 shrink-0 ${
-              activeTab === 'settings'
-                ? 'border-amber-400 text-amber-300 bg-amber-950/30'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Key className="w-3.5 h-3.5" />
-            {isSavedKey ? 'Đã kết nối Gemini Key' : 'Cài đặt Gemini Key'}
-          </button>
+          {isAdmin ? (
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`ml-auto px-3.5 py-2 text-xs font-semibold rounded-t-lg border-b-2 transition flex items-center gap-1.5 shrink-0 ${
+                activeTab === 'settings'
+                  ? 'border-amber-400 text-amber-300 bg-amber-950/30'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Key className="w-3.5 h-3.5" />
+              {isSavedKey ? 'API Server: Đã lưu (Admin)' : 'Cài đặt API (Admin)'}
+            </button>
+          ) : (
+            <span className="ml-auto px-3 py-1.5 text-[10px] font-semibold text-emerald-300/90 flex items-center gap-1 shrink-0">
+              <Key className="w-3 h-3" />
+              {isSavedKey ? 'AI Server: Đã kết nối' : 'AI Nội Tại'}
+            </span>
+          )}
         </div>
 
         {/* Body Content */}
@@ -1132,8 +1160,8 @@ export function BambuSupportAIAssistantModal({
                 </div>
               )}
 
-              {/* TAB 6: CÀI ĐẶT GEMINI API KEY & CHỌN MODEL */}
-              {activeTab === 'settings' && (
+              {/* TAB 6: CÀI ĐẶT GEMINI API KEY & CHỌN MODEL (CHỈ MASTER ADMIN) */}
+              {isAdmin && activeTab === 'settings' && (
                 <div className="space-y-4">
                   <div className="p-4 rounded-xl bg-slate-800/70 border border-slate-700 space-y-3">
                     <div className="flex items-center justify-between">

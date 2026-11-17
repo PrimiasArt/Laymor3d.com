@@ -127,6 +127,9 @@ export function SimulatorHeader({
   orcaStatus,
   onQuickGenerateTree,
 }: SimulatorHeaderProps) {
+  const isStrictAdmin = Boolean(
+    currentUser && (currentUser.role === 'admin' || currentUser.username === 'hlcai_admin')
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isStudioMenuOpen, setIsStudioMenuOpen] = useState(false);
   const studioBtnRef = useRef<HTMLButtonElement>(null);
@@ -371,39 +374,66 @@ export function SimulatorHeader({
               </div>
             </button>
 
-            {/* 7. Gemini API Key */}
-            <button
-              type="button"
-              data-testid="gemini-key-modal-btn"
-              onClick={() => {
-                setIsStudioMenuOpen(false);
-                onOpenGeminiKeyModal();
-              }}
-              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-[var(--bg-hover)] text-left transition-colors cursor-pointer"
-            >
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg studio-card flex items-center justify-center studio-text-gold shrink-0">
-                  <IconKeyMinimal size={15} />
-                </div>
-                <div>
-                  <div className="text-xs font-semibold studio-text-primary flex items-center gap-2">
-                    <span>Khóa Kết Nối Gemini API</span>
-                    <span
-                      className={`text-[9px] px-1.5 py-0.2 rounded font-mono ${
-                        hasGeminiKey
-                          ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
-                          : 'studio-gold-badge'
-                      }`}
-                    >
-                      {hasGeminiKey ? 'ĐÃ KẾT NỐI' : 'CHƯA CẤU HÌNH'}
-                    </span>
+            {/* 7. Gemini API Key (Strict Admin Only) */}
+            {isStrictAdmin ? (
+              <button
+                type="button"
+                data-testid="gemini-key-modal-btn"
+                onClick={() => {
+                  setIsStudioMenuOpen(false);
+                  onOpenGeminiKeyModal();
+                }}
+                className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-[var(--bg-hover)] text-left transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg studio-card flex items-center justify-center studio-text-gold shrink-0">
+                    <IconKeyMinimal size={15} />
                   </div>
-                  <div className="text-[10px] studio-text-secondary">
-                    Xác thực trợ lý suy luận AI đám mây
+                  <div>
+                    <div className="text-xs font-semibold studio-text-primary flex items-center gap-2">
+                      <span>Khóa Kết Nối Gemini API (Admin)</span>
+                      <span
+                        className={`text-[9px] px-1.5 py-0.2 rounded font-mono ${
+                          hasGeminiKey
+                            ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                            : 'studio-gold-badge'
+                        }`}
+                      >
+                        {hasGeminiKey ? 'ĐÃ LƯU SERVER' : 'CHƯA CẤU HÌNH'}
+                      </span>
+                    </div>
+                    <div className="text-[10px] studio-text-secondary">
+                      Cài đặt khóa API dùng chung toàn hệ thống
+                    </div>
+                  </div>
+                </div>
+              </button>
+            ) : (
+              <div className="w-full flex items-center justify-between p-2 rounded-xl studio-card opacity-85 text-left">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg studio-card flex items-center justify-center studio-text-gold shrink-0">
+                    <IconKeyMinimal size={15} />
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold studio-text-primary flex items-center gap-2">
+                      <span>Trợ Lý AI Server</span>
+                      <span
+                        className={`text-[9px] px-1.5 py-0.2 rounded font-mono ${
+                          hasGeminiKey
+                            ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                            : 'studio-gold-badge'
+                        }`}
+                      >
+                        {hasGeminiKey ? 'ĐÃ KẾT NỐI' : 'CHỜ ADMIN BẬT'}
+                      </span>
+                    </div>
+                    <div className="text-[10px] studio-text-secondary">
+                      Khóa API được Admin quản lý tập trung trên Server
+                    </div>
                   </div>
                 </div>
               </div>
-            </button>
+            )}
 
             {/* 8. Live Telemetry & Supabase */}
             <div className="grid grid-cols-2 gap-1.5 pt-1">

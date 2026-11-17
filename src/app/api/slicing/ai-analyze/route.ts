@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { aiSlicingProfileService } from '@/backend/services/slicing/AISlicingProfileService';
 import { obsidianVaultService } from '@/backend/services/knowledge/ObsidianVaultService';
+import { configRepository } from '@/backend/repositories/ConfigRepository';
 
 export async function POST(req: NextRequest) {
   try {
+    await configRepository.ensureHydratedAsync();
     const body = await req.json();
     const {
       modelId = 'benchy',

@@ -5,6 +5,7 @@ import { MeshyAdapter } from './MeshyAdapter';
 import { TripoAdapter } from './TripoAdapter';
 import { SimulationAdapter } from './SimulationAdapter';
 import { modelRepository } from '../../repositories/ModelRepository';
+import { configRepository } from '../../repositories/ConfigRepository';
 
 export class AIService {
   private providers: Map<AIProviderType, IAI3DProvider> = new Map();
@@ -25,6 +26,7 @@ export class AIService {
     engine: AIProviderType = 'simulation',
     options?: GenerateOptions
   ): Promise<IAI3DJob> {
+    await configRepository.ensureHydratedAsync();
     const provider = this.getProvider(engine);
     
     // Simulate intelligent prompt optimization (similar to Gemini spatial reasoning)

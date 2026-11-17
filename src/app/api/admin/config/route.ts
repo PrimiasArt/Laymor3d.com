@@ -1,28 +1,61 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { configRepository } from '@/backend/repositories/ConfigRepository';
-import { userRepository } from '@/backend/repositories/UserRepository';
+import { resolveRequestUser } from '@/backend/services/auth/sessionGuard';
+import { isNeonConfigured } from '@/backend/services/neon/neonClient';
+import { supabaseCloudService } from '@/backend/db/supabaseClient';
+import { auditLogRepository } from '@/backend/repositories/AuditLogRepository';
 
-export async function GET() {
+function isStrictAdminUser(user: Awaited<ReturnType<typeof resolveRequestUser>>['user']): boolean {
+  return Boolean(user && (user.role === 'admin' || user.username === 'hlcai_admin'));
+}
+
+function buildBackendLabel(backend: string): string {
+  if (backend === 'neon_postgres') return 'Neon PostgreSQL';
+  if (backend === 'supabase_kv') return 'Supabase Cloud KV';
+  return 'Bộ nhớ tạm (RAM/Disk)';
+}
+
+export async function GET(req: NextRequest) {
   try {
-    const activeUser = userRepository.getActiveUser();
-    const config = configRepository.getConfig();
+    const [{ user }, storageBackend] = await Promise.all([
+      resolveRequestUser(req),
+      configRepository.ensureHydratedAsync(),
+    ]);
 
-    // Ẩn một phần API key nếu không phải admin
-    const isMasterAdmin = activeUser.role === 'admin';
+    const config = configRepository.getConfig();
+    const isStrictAdmin = isStrictAdminUser(user);
+
+    const hasGemini = Boolean(config.apiKeys?.geminiApiKey);
+    const hasFal = Boolean(config.apiKeys?.falKey);
+    const hasMeshy = Boolean(config.apiKeys?.meshyApiKey);
+    const hasMakerWorld = Boolean(config.apiKeys?.makerWorldCookie);
+
+    // TUYỆT ĐỐI KHÔNG gửi bất kỳ API key nào xuống client trừ tài khoản Admin thực thụ
     const safeConfig = {
       ...config,
       apiKeys: {
-        falKey: config.apiKeys.falKey ? (isMasterAdmin ? config.apiKeys.falKey : '******') : '',
-        meshyApiKey: config.apiKeys.meshyApiKey ? (isMasterAdmin ? config.apiKeys.meshyApiKey : '******') : '',
-        geminiApiKey: config.apiKeys.geminiApiKey ? (isMasterAdmin ? config.apiKeys.geminiApiKey : '******') : '',
-        makerWorldCookie: config.apiKeys.makerWorldCookie ? (isMasterAdmin ? config.apiKeys.makerWorldCookie : '******') : '',
+        falKey: isStrictAdmin ? config.apiKeys.falKey : '',
+        meshyApiKey: isStrictAdmin ? config.apiKeys.meshyApiKey : '',
+        geminiApiKey: isStrictAdmin ? config.apiKeys.geminiApiKey : '',
+        makerWorldCookie: isStrictAdmin ? config.apiKeys.makerWorldCookie : '',
+        preferredGeminiModel: config.apiKeys.preferredGeminiModel || 'gemini-2.0-flash',
       },
     };
 
     return NextResponse.json({
       success: true,
       config: safeConfig,
-      currentUserRole: activeUser.role,
+      isStrictAdmin,
+      currentUserRole: user?.role || 'guest',
+      apiStatus: {
+        geminiConnected: hasGemini,
+        falConnected: hasFal,
+        meshyConnected: hasMeshy,
+        makerWorldConnected: hasMakerWorld,
+        preferredGeminiModel: safeConfig.apiKeys.preferredGeminiModel,
+      },
+      storageBackend,
+      storageLabel: buildBackendLabel(storageBackend),
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -31,10 +64,18 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    const activeUser = userRepository.getActiveUser();
-    if (activeUser.role !== 'admin') {
+    const [{ user }] = await Promise.all([
+      resolveRequestUser(req),
+      configRepository.ensureHydratedAsync(),
+    ]);
+
+    if (!isStrictAdminUser(user)) {
       return NextResponse.json(
-        { error: 'Chỉ tài khoản Admin mới có quyền cấu hình API, giá vốn và phân quyền Module!' },
+        {
+          error:
+            'Chỉ tài khoản Admin tối cao mới có quyền xem, cài đặt API Key, giá vốn và phân quyền Module!',
+          code: 'ADMIN_ONLY',
+        },
         { status: 403 }
       );
     }
@@ -54,47 +95,95 @@ export async function POST(req: NextRequest) {
       isEnabled,
     } = body;
 
+    const actorName = user!.name || user!.username || 'Admin';
     let updatedConfig = configRepository.getConfig();
 
     if (section === 'environment' || environment) {
       if (environment === 'staging' || environment === 'official') {
-        updatedConfig = configRepository.setEnvironment(environment, activeUser.name);
+        updatedConfig = configRepository.setEnvironment(environment, actorName);
       }
     }
 
     if (section === 'commercial' || commercial) {
-      updatedConfig = configRepository.updateCommercial(commercial, activeUser.name);
+      updatedConfig = configRepository.updateCommercial(commercial, actorName);
     }
 
     if (section === 'materials' || materials) {
-      updatedConfig = configRepository.updateMaterials(materials, activeUser.name);
+      updatedConfig = configRepository.updateMaterials(materials, actorName);
     }
 
     if (section === 'operations' || operations) {
-      updatedConfig = configRepository.updateOperations(operations, activeUser.name);
+      updatedConfig = configRepository.updateOperations(operations, actorName);
     }
 
     if (section === 'aiPricing' || aiPricing) {
-      updatedConfig = configRepository.updateAIPricing(aiPricing, activeUser.name);
+      updatedConfig = configRepository.updateAIPricing(aiPricing, actorName);
     }
 
     if (section === 'apiKeys' || apiKeys) {
-      updatedConfig = configRepository.updateApiKeys(apiKeys, activeUser.name);
+      const cleanKeys = {
+        ...(apiKeys || {}),
+        ...(typeof apiKeys?.geminiApiKey === 'string'
+          ? { geminiApiKey: apiKeys.geminiApiKey.trim() }
+          : {}),
+        ...(typeof apiKeys?.falKey === 'string' ? { falKey: apiKeys.falKey.trim() } : {}),
+        ...(typeof apiKeys?.meshyApiKey === 'string'
+          ? { meshyApiKey: apiKeys.meshyApiKey.trim() }
+          : {}),
+        ...(typeof apiKeys?.makerWorldCookie === 'string'
+          ? { makerWorldCookie: apiKeys.makerWorldCookie.trim() }
+          : {}),
+      };
+      updatedConfig = configRepository.updateApiKeys(cleanKeys, actorName);
     }
 
-    // Quản lý Phân Quyền Module
     if (section === 'modulePermissions' || modulePermissions) {
-      updatedConfig = configRepository.updateModulePermissions(modulePermissions, activeUser.name);
+      updatedConfig = configRepository.updateModulePermissions(modulePermissions, actorName);
     }
 
     if (moduleKey && role && isEnabled !== undefined) {
-      updatedConfig = configRepository.setModulePermission(moduleKey, role, isEnabled, activeUser.name);
+      updatedConfig = configRepository.setModulePermission(moduleKey, role, isEnabled, actorName);
+    }
+
+    const saveRes = await configRepository.persistDurableAsync();
+    const dbConfigured = isNeonConfigured() || supabaseCloudService.isConfigured;
+    if (dbConfigured && !saveRes.persistedToDb) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            saveRes.error ||
+            'Không thể ghi cấu hình lên Database Server lúc này. Vui lòng thử lại.',
+        },
+        { status: 503 }
+      );
+    }
+
+    if (section === 'apiKeys' || apiKeys) {
+      await auditLogRepository
+        .addKnowledgeAuditLogAsync({
+          actorId: user!.id,
+          actorName,
+          actorRole: user!.role,
+          action: 'knowledge_moderate',
+          actionTitle: 'Admin Cập Nhật Khóa API Hệ Thống',
+          description: `Đã lưu API Server lên ${buildBackendLabel(saveRes.storageBackend)} (Gemini=${Boolean(
+            updatedConfig.apiKeys.geminiApiKey
+          )}, Fal=${Boolean(updatedConfig.apiKeys.falKey)}, Meshy=${Boolean(
+            updatedConfig.apiKeys.meshyApiKey
+          )})`,
+          severity: 'warning',
+        })
+        .catch(() => {});
     }
 
     return NextResponse.json({
       success: true,
-      message: 'Cập nhật cấu hình hệ thống thành công!',
+      message: `Đã lưu cấu hình lên Server (${buildBackendLabel(saveRes.storageBackend)}) để toàn hệ thống dùng chung!`,
       config: updatedConfig,
+      storageBackend: saveRes.storageBackend,
+      storageLabel: buildBackendLabel(saveRes.storageBackend),
+      persistedToDb: saveRes.persistedToDb,
     });
   } catch (err: any) {
     console.error('Error in /api/admin/config POST:', err);

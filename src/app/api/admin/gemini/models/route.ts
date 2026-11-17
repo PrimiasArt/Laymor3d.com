@@ -1,9 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { configRepository } from '@/backend/repositories/ConfigRepository';
-import { userRepository } from '@/backend/repositories/UserRepository';
+import { resolveRequestUser } from '@/backend/services/auth/sessionGuard';
+
+function isStrictAdmin(user: Awaited<ReturnType<typeof resolveRequestUser>>['user']): boolean {
+  return Boolean(user && (user.role === 'admin' || user.username === 'hlcai_admin'));
+}
 
 export async function GET(req: NextRequest) {
   try {
+    const [{ user }] = await Promise.all([
+      resolveRequestUser(req),
+      configRepository.ensureHydratedAsync(),
+    ]);
+    if (!isStrictAdmin(user)) {
+      return NextResponse.json(
+        { success: false, error: 'Chỉ tài khoản Admin mới được phép truy cập cài đặt API Gemini.' },
+        { status: 403 }
+      );
+    }
+
     const { searchParams } = new URL(req.url);
     const queryKey = searchParams.get('apiKey');
     const apiKey = (queryKey && queryKey.trim().length > 0)
@@ -82,6 +97,17 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const [{ user }] = await Promise.all([
+      resolveRequestUser(req),
+      configRepository.ensureHydratedAsync(),
+    ]);
+    if (!isStrictAdmin(user)) {
+      return NextResponse.json(
+        { success: false, error: 'Chỉ tài khoản Admin mới được phép kiểm tra API Gemini.' },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json().catch(() => ({}));
     const apiKey = body.apiKey ? body.apiKey.trim() : configRepository.getGeminiApiKey();
 

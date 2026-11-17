@@ -81,7 +81,10 @@ import { EngineComparisonModal } from '@/components/controls/EngineComparisonMod
 import { BambuTimelapseModal } from '@/components/controls/BambuTimelapseModal';
 import { BambuSupportAIAssistantModal } from '@/components/controls/BambuSupportAIAssistantModal';
 import { GeminiApiKeyModal } from '@/components/controls/GeminiApiKeyModal';
-import { getSavedGeminiApiKey } from '@/services/geminiSupportService';
+import {
+  getSavedGeminiApiKey,
+  fetchServerGeminiAvailability,
+} from '@/services/geminiSupportService';
 import { LocalSlicerModal } from '@/components/controls/LocalSlicerModal';
 import { ModelLibraryModal } from '@/components/controls/ModelLibraryModal';
 import { AI3DGeneratorModal } from '@/components/controls/AI3DGeneratorModal';
@@ -251,6 +254,23 @@ export default function App() {
     logout: handleAuthLogout,
     isFeatureAllowed,
   } = useLaymorAuth(showSimToast);
+  const isStrictAdmin = Boolean(
+    currentUser && (currentUser.role === 'admin' || currentUser.username === 'hlcai_admin')
+  );
+  useEffect(() => {
+    fetchServerGeminiAvailability(true).then((status) => {
+      setHasGeminiKey(status.available);
+    });
+  }, [currentUser?.id]);
+  const handleOpenGeminiKeyModal = useCallback(() => {
+    if (!isStrictAdmin) {
+      showSimToast(
+        '🔒 Chỉ tài khoản Admin mới được xem và cài đặt API Key. Mọi thành viên dùng thẳng AI qua Server.'
+      );
+      return;
+    }
+    setIsGeminiKeyModalOpen(true);
+  }, [isStrictAdmin, showSimToast]);
   const [loadedPlates, setLoadedPlates] = useState<ILoadedBambuPlate[]>([]);
   const [activePlateId, setActivePlateId] = useState<number>(1);
   const [hasNativeBambuSupport, setHasNativeBambuSupport] = useState<boolean>(true);
@@ -1533,7 +1553,7 @@ export default function App() {
         onOpenTimelapseModal={() => setIsTimelapseModalOpen(true)}
         onOpenSupportAIModal={() => setIsSupportAIModalOpen(true)}
         hasGeminiKey={hasGeminiKey}
-        onOpenGeminiKeyModal={() => setIsGeminiKeyModalOpen(true)}
+        onOpenGeminiKeyModal={handleOpenGeminiKeyModal}
         onOpenLocalSlicerModal={() => setIsLocalSlicerModalOpen(true)}
         onOpenModelLibrary={() => setIsModelLibraryOpen(true)}
         onOpenLiveInspectorModal={() => setIsLiveInspectorOpen(true)}
@@ -1597,8 +1617,9 @@ export default function App() {
           isOpen={isProfileOpen}
           onToggleOpen={() => setIsProfileOpen((prev) => !prev)}
           onOpenSupportAIModal={() => setIsSupportAIModalOpen(true)}
-          onOpenGeminiKeyModal={() => setIsGeminiKeyModalOpen(true)}
+          onOpenGeminiKeyModal={handleOpenGeminiKeyModal}
           onOpenLocalSlicerModal={() => setIsLocalSlicerModalOpen(true)}
+          isAdmin={isStrictAdmin}
         />
 
         {/* 2.2 Center 3D Viewport Stage + Docked Bottom Action/Timeline Bar */}
@@ -1857,6 +1878,7 @@ export default function App() {
           setProfile((prev) => ({ ...prev, ...updated }));
         }}
         onChangeTransform={setModelTransform}
+        isAdmin={isStrictAdmin}
       />
 
       {/* 10. Dedicated Gemini AI API Key Configuration Modal */}
@@ -1864,6 +1886,7 @@ export default function App() {
         isOpen={isGeminiKeyModalOpen}
         onClose={() => setIsGeminiKeyModalOpen(false)}
         onKeyUpdated={(hasKey) => setHasGeminiKey(hasKey)}
+        isAdmin={isStrictAdmin}
       />
 
       {/* 11. Local Slicer CLI Studio Modal (Bambu Studio & PrusaSlicer) */}

@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { geminiAnalyticsService } from '@/backend/services/analytics/GeminiAnalyticsService';
 import { trendScoringEngine } from '@/backend/services/analytics/TrendScoringEngine';
+import { configRepository } from '@/backend/repositories/ConfigRepository';
 
 export async function GET(req: NextRequest) {
   try {
+    await configRepository.ensureHydratedAsync();
     const { searchParams } = new URL(req.url);
     const category = searchParams.get('category') || undefined;
     const model = searchParams.get('model') || undefined;
@@ -28,6 +30,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    await configRepository.ensureHydratedAsync();
     const body = await req.json().catch(() => ({}));
     const category = body.category || undefined;
     const model = body.model || undefined;

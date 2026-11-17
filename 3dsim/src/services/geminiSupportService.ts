@@ -237,148 +237,205 @@ export function saveGeminiModel(modelId: string): void {
   } catch {}
 }
 
+let serverGeminiCache: { available: boolean; preferredModel: string; checkedAt: number } = {
+  available: false,
+  preferredModel: 'gemini-2.0-flash',
+  checkedAt: 0,
+};
+
 /**
- * Lấy Gemini API Key lưu trong LocalStorage (hoặc biến môi trường Vite)
+ * Truy vấn trạng thái Gemini Server từ backend (chỉ trả boolean & model mặc định, không bao giờ lộ Key)
  */
+export async function fetchServerGeminiAvailability(
+  forceRefresh = false
+): Promise<{ available: boolean; preferredModel: string }> {
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem(STORAGE_KEY_GEMINI);
+    } catch {}
+  }
+
+  const now = Date.now();
+  if (!forceRefresh && serverGeminiCache.checkedAt > 0 && now - serverGeminiCache.checkedAt < 25000) {
+    return {
+      available: serverGeminiCache.available,
+      preferredModel: serverGeminiCache.preferredModel,
+    };
+  }
+
+  try {
+    const res = await fetch('/api/ai/gemini', {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    const data = await res.json();
+    if (res.ok && data?.success) {
+      serverGeminiCache = {
+        available: Boolean(data.available),
+        preferredModel: data.preferredModel || getSavedGeminiModel(),
+        checkedAt: now,
+      };
+      if (data.preferredModel) {
+        saveGeminiModel(data.preferredModel);
+      }
+    }
+  } catch {
+    // Offline/standalone fallback keeps false safely
+  }
+
+  return {
+    available: serverGeminiCache.available,
+    preferredModel: serverGeminiCache.preferredModel,
+  };
+}
+
 export function getSavedGeminiApiKey(): string {
-  try {
-    const local = localStorage.getItem(STORAGE_KEY_GEMINI);
-    if (local && local.trim().length > 0) return local.trim();
-  } catch {}
-  return import.meta.env.VITE_GEMINI_API_KEY || '';
+  // Bảo mật: không đọc API Key thô từ trình duyệt nữa; chỉ dùng cờ sẵn sàng từ Server
+  return serverGeminiCache.available ? '__SERVER_CONFIGURED__' : '';
 }
 
-/**
- * Lưu Gemini API Key vào LocalStorage
- */
-export function saveGeminiApiKey(key: string): void {
-  try {
-    localStorage.setItem(STORAGE_KEY_GEMINI, key.trim());
-  } catch {}
+export function saveGeminiApiKey(_key: string): void {
+  // Không lưu khóa API thô vào localStorage trình duyệt
 }
 
-/**
- * Xóa Gemini API Key
- */
 export function clearGeminiApiKey(): void {
   try {
     localStorage.removeItem(STORAGE_KEY_GEMINI);
   } catch {}
 }
 
+export async function fetchAdminServerGeminiConfig(): Promise<{
+  ok: boolean;
+  geminiApiKey?: string;
+  preferredGeminiModel?: string;
+  storageLabel?: string;
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/admin/config', {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success || !data.isStrictAdmin) {
+      return { ok: false, error: 'Chỉ tài khoản Admin mới được phép xem & chỉnh sửa Khóa API.' };
+    }
+    return {
+      ok: true,
+      geminiApiKey: data.config?.apiKeys?.geminiApiKey || '',
+      preferredGeminiModel: data.config?.apiKeys?.preferredGeminiModel || 'gemini-2.0-flash',
+      storageLabel: data.storageLabel || 'Neon PostgreSQL',
+    };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Lỗi tải cấu hình API từ Server' };
+  }
+}
+
+export async function saveAdminServerGeminiConfig(
+  geminiApiKey: string,
+  preferredGeminiModel: string
+): Promise<{ ok: boolean; message?: string; error?: string; storageLabel?: string }> {
+  try {
+    const res = await fetch('/api/admin/config', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        section: 'apiKeys',
+        apiKeys: {
+          geminiApiKey: geminiApiKey.trim(),
+          preferredGeminiModel: preferredGeminiModel.trim() || 'gemini-2.0-flash',
+        },
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success) {
+      return { ok: false, error: data?.error || 'Không thể lưu khóa API lên Server.' };
+    }
+    await fetchServerGeminiAvailability(true);
+    return {
+      ok: true,
+      message: data.message,
+      storageLabel: data.storageLabel || 'Neon PostgreSQL',
+    };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Lỗi lưu khóa API lên Server' };
+  }
+}
+
 /**
- * Helper gọi Gemini REST API kèm cơ chế tự động fallback model tương thích với API Key
+ * Gọi Gemini thông qua Server Proxy (/api/ai/gemini) để bảo mật API Key nhưng mọi user đều dùng được
  */
 async function callGeminiGenerateContent(
-  apiKey: string,
+  _apiKey: string,
   preferredModel: string,
   parts: any[],
   systemInstruction?: string,
   jsonMode: boolean = true,
   maxOutputTokens: number = 2500
 ): Promise<{ ok: boolean; status: number; text: string; modelUsed: string; errorMessage?: string }> {
-  const candidateModels = Array.from(
-    new Set([preferredModel, 'gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview'])
-  );
-
-  let lastStatus = 0;
-  let lastError = '';
-
-  for (const modelId of candidateModels) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-    const bodyPayload: Record<string, any> = {
-      contents: [{ role: 'user', parts }],
-      generationConfig: {
-        temperature: 0.25,
-        topK: 40,
-        topP: 0.95,
+  try {
+    const response = await fetch('/api/ai/gemini', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'generate',
+        preferredModel,
+        parts,
+        systemInstruction,
+        jsonMode,
         maxOutputTokens,
-        ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
-      },
+      }),
+    });
+    const data = await response.json();
+    return {
+      ok: Boolean(data?.ok && data?.text),
+      status: Number(data?.status || response.status),
+      text: String(data?.text || ''),
+      modelUsed: String(data?.modelUsed || preferredModel),
+      errorMessage: data?.errorMessage,
     };
-    if (systemInstruction) {
-      bodyPayload.systemInstruction = {
-        parts: [{ text: systemInstruction }],
-      };
-    }
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bodyPayload),
-      });
-
-      lastStatus = response.status;
-      if (response.ok) {
-        const data = await response.json();
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        if (text) {
-          return { ok: true, status: 200, text, modelUsed: modelId };
-        }
-      } else {
-        try {
-          const errJson = await response.json();
-          lastError = errJson?.error?.message || response.statusText;
-        } catch {
-          lastError = response.statusText;
-        }
-        // Nếu lỗi 400/404 do tên model chưa mở trên project của user, thử tiếp model kế tiếp
-        if (response.status === 404 || response.status === 400) {
-          continue;
-        }
-        break;
-      }
-    } catch (err: any) {
-      lastError = err?.message || 'Lỗi kết nối mạng';
-    }
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 500,
+      text: '',
+      modelUsed: preferredModel,
+      errorMessage: err?.message || 'Lỗi kết nối Server AI',
+    };
   }
-
-  return {
-    ok: false,
-    status: lastStatus,
-    text: '',
-    modelUsed: preferredModel,
-    errorMessage: lastError,
-  };
 }
 
 /**
- * Kiểm tra kết nối thực tế tới Google Gemini API bằng API Key cung cấp
+ * Kiểm tra kết nối thực tế tới Google Gemini API qua Server (chỉ dành cho Admin)
  */
 export async function testGeminiApiKey(
   key: string,
   targetModelId?: string
 ): Promise<{ success: boolean; latencyMs?: number; error?: string; modelName?: string }> {
-  const cleanKey = key.trim();
-  if (!cleanKey) {
-    return { success: false, error: 'Chưa nhập API Key. Vui lòng dán key của bạn vào ô bên dưới.' };
-  }
   const chosenModel = targetModelId || getSavedGeminiModel();
-  const startTime = performance.now();
-
-  const res = await callGeminiGenerateContent(
-    cleanKey,
-    chosenModel,
-    [{ text: 'Hello, respond with {"status":"OK"}' }],
-    undefined,
-    false,
-    16
-  );
-  const latencyMs = Math.round(performance.now() - startTime);
-  const modelName =
-    GEMINI_AVAILABLE_MODELS.find((m) => m.id === res.modelUsed)?.name || res.modelUsed;
-
-  if (!res.ok) {
+  try {
+    const res = await fetch('/api/ai/gemini', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'test',
+        apiKey: key.trim(),
+        preferredModel: chosenModel,
+      }),
+    });
+    const data = await res.json();
     return {
-      success: false,
-      error: res.errorMessage || `Mã lỗi HTTP ${res.status}`,
-      latencyMs,
-      modelName,
+      success: Boolean(data?.success),
+      latencyMs: data?.latencyMs,
+      error: data?.error,
+      modelName: data?.modelName || chosenModel,
     };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Lỗi kiểm tra API trên Server' };
   }
-
-  return { success: true, latencyMs, modelName };
 }
 
 /**
@@ -999,12 +1056,13 @@ export async function analyzeWithGeminiAI(
   customApiKey?: string,
   intent: PrintConsultIntent = 'balanced'
 ): Promise<ISupportAnalysisResult> {
-  const apiKey = (customApiKey || getSavedGeminiApiKey()).trim();
   const baseExpertResult = analyzeWithBambuExpertRules(modelName, geometry, profile, intent);
+  const serverStatus = await fetchServerGeminiAvailability();
 
-  if (!apiKey) {
+  if (!serverStatus.available) {
     return baseExpertResult;
   }
+  const apiKey = '__SERVER_MANAGED__';
 
   const metrics = extractGeometryMetrics(geometry);
   const intentMeta =
@@ -1183,7 +1241,7 @@ export async function consultChatWithGeminiAI(
   intent: PrintConsultIntent = 'balanced',
   customApiKey?: string
 ): Promise<IConsultChatMessage> {
-  const apiKey = (customApiKey || getSavedGeminiApiKey()).trim();
+  const apiKey = '__SERVER_MANAGED__';
   const metrics = extractGeometryMetrics(geometry);
   const matchedRules = matchWorkshopKnowledgeRules(metrics, profile);
 
@@ -1303,7 +1361,8 @@ export async function consultChatWithGeminiAI(
     };
   };
 
-  if (!apiKey) {
+  const serverStatus = await fetchServerGeminiAvailability();
+  if (!serverStatus.available) {
     return buildLocalSmartReply();
   }
 
@@ -1404,7 +1463,7 @@ export async function diagnosePrintPhotoWithAI(
   imageMimeType?: string,
   customApiKey?: string
 ): Promise<IPhotoDiagnosisResult> {
-  const apiKey = (customApiKey || getSavedGeminiApiKey()).trim();
+  const apiKey = '__SERVER_MANAGED__';
 
   const buildLocalVisionFallback = (): IPhotoDiagnosisResult => {
     const s = symptomText.toLowerCase();
@@ -1525,7 +1584,8 @@ export async function diagnosePrintPhotoWithAI(
     };
   };
 
-  if (!apiKey) {
+  const serverStatus = await fetchServerGeminiAvailability();
+  if (!serverStatus.available) {
     return buildLocalVisionFallback();
   }
 

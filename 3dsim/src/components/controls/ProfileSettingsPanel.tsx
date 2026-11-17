@@ -33,6 +33,7 @@ interface ProfileSettingsPanelProps {
   onOpenSupportAIModal?: () => void;
   onOpenGeminiKeyModal?: () => void;
   onOpenLocalSlicerModal?: () => void;
+  isAdmin?: boolean;
 }
 
 type SettingsTab = 'basic' | 'support' | 'quality' | 'advanced';
@@ -46,6 +47,7 @@ export function ProfileSettingsPanel({
   onOpenSupportAIModal,
   onOpenGeminiKeyModal,
   onOpenLocalSlicerModal,
+  isAdmin = false,
 }: ProfileSettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('basic');
 
@@ -1230,7 +1232,7 @@ export function ProfileSettingsPanel({
                     </div>
                   </div>
 
-                  {onOpenGeminiKeyModal && (
+                  {isAdmin && onOpenGeminiKeyModal && (
                     <button
                       type="button"
                       onClick={onOpenGeminiKeyModal}

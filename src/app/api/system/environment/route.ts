@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { configRepository } from '@/backend/repositories/ConfigRepository';
-import { userRepository } from '@/backend/repositories/UserRepository';
+import { resolveRequestUser } from '@/backend/services/auth/sessionGuard';
 
 export async function GET() {
   try {
+    await configRepository.ensureHydratedAsync();
     const config = configRepository.getConfig();
     return NextResponse.json({
       success: true,
@@ -30,8 +31,12 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    const activeUser = userRepository.getActiveUser();
-    if (activeUser.role !== 'admin') {
+    const [{ user }] = await Promise.all([
+      resolveRequestUser(req),
+      configRepository.ensureHydratedAsync(),
+    ]);
+
+    if (!user || (user.role !== 'admin' && user.username !== 'hlcai_admin')) {
       return NextResponse.json(
         { error: 'Chỉ tài khoản Quản Trị Viên (Admin) mới có quyền chuyển đổi môi trường Staging / Official!' },
         { status: 403 }
@@ -48,7 +53,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const updatedConfig = configRepository.setEnvironment(environment, activeUser.name);
+    const updatedConfig = configRepository.setEnvironment(environment, user.name || user.username || 'Admin');
+    await configRepository.persistDurableAsync();
 
     return NextResponse.json({
       success: true,
@@ -57,7 +63,10 @@ export async function POST(req: NextRequest) {
         environment === 'official'
           ? '🌟 Đã kích hoạt [Bản Thương Mại Official]: Vận hành sản xuất thực tế & bảng giá thương mại niêm yết.'
           : '🧪 Đã chuyển sang [Bản Thử Nghiệm Staging]: Kích hoạt sandbox thử nghiệm, giá gốc 0% phụ thu.',
-      updatedConfig,
+      updatedConfig: {
+        ...updatedConfig,
+        apiKeys: undefined,
+      },
     });
   } catch (err: any) {
     console.error('Error in POST /api/system/environment:', err);

@@ -13,13 +13,73 @@ import {
   SystemModuleKey,
 } from '../domain/config';
 import { UserRole } from '../domain/user';
+import { executeNeonQuery, isNeonConfigured } from '../services/neon/neonClient';
+import { supabaseCloudService } from '../db/supabaseClient';
+
+export type ConfigStorageBackend = 'neon_postgres' | 'supabase_kv' | 'disk_memory';
 
 class ConfigRepository {
   private config: ISystemConfig = { ...DEFAULT_SYSTEM_CONFIG };
   private filePath: string = path.join(process.cwd(), 'data', 'system_config.json');
+  private hydratedFromDb: boolean = false;
+  private hydrationPromise: Promise<void> | null = null;
+  private lastStorageBackend: ConfigStorageBackend = 'disk_memory';
 
   constructor() {
     this.loadFromDisk();
+  }
+
+  private mergeConfig(parsed: Partial<ISystemConfig>): void {
+    this.config = {
+      ...DEFAULT_SYSTEM_CONFIG,
+      ...this.config,
+      ...parsed,
+      commercial: {
+        ...DEFAULT_SYSTEM_CONFIG.commercial,
+        ...(parsed.commercial || this.config.commercial),
+      },
+      materials: {
+        ...DEFAULT_SYSTEM_CONFIG.materials,
+        ...(parsed.materials || this.config.materials),
+      },
+      operations: {
+        ...DEFAULT_SYSTEM_CONFIG.operations,
+        ...(parsed.operations || this.config.operations),
+      },
+      aiPricing: {
+        ...DEFAULT_SYSTEM_CONFIG.aiPricing,
+        ...(parsed.aiPricing || this.config.aiPricing),
+      },
+      apiKeys: {
+        ...DEFAULT_SYSTEM_CONFIG.apiKeys,
+        ...this.config.apiKeys,
+        ...(parsed.apiKeys || {}),
+      },
+      modulePermissions: {
+        ...DEFAULT_SYSTEM_CONFIG.modulePermissions,
+        ...(parsed.modulePermissions || this.config.modulePermissions),
+      },
+    };
+    this.syncEnvFromConfig();
+  }
+
+  private syncEnvFromConfig(): void {
+    if (!this.config.apiKeys) return;
+    if (this.config.apiKeys.geminiApiKey) {
+      process.env.GEMINI_API_KEY = this.config.apiKeys.geminiApiKey;
+    } else if (process.env.GEMINI_API_KEY) {
+      this.config.apiKeys.geminiApiKey = process.env.GEMINI_API_KEY;
+    }
+    if (this.config.apiKeys.falKey) {
+      process.env.FAL_KEY = this.config.apiKeys.falKey;
+    } else if (process.env.FAL_KEY) {
+      this.config.apiKeys.falKey = process.env.FAL_KEY;
+    }
+    if (this.config.apiKeys.meshyApiKey) {
+      process.env.MESHY_API_KEY = this.config.apiKeys.meshyApiKey;
+    } else if (process.env.MESHY_API_KEY) {
+      this.config.apiKeys.meshyApiKey = process.env.MESHY_API_KEY;
+    }
   }
 
   private loadFromDisk(): void {
@@ -27,30 +87,9 @@ class ConfigRepository {
       if (fs.existsSync(this.filePath)) {
         const raw = fs.readFileSync(this.filePath, 'utf-8');
         const parsed = JSON.parse(raw);
-        this.config = {
-          ...DEFAULT_SYSTEM_CONFIG,
-          ...parsed,
-          apiKeys: {
-            ...DEFAULT_SYSTEM_CONFIG.apiKeys,
-            ...(parsed.apiKeys || {}),
-          },
-        };
-      }
-
-      // Đọc đồng bộ từ biến môi trường nếu có
-      if (process.env.GEMINI_API_KEY && !this.config.apiKeys.geminiApiKey) {
-        this.config.apiKeys.geminiApiKey = process.env.GEMINI_API_KEY;
-      }
-      if (process.env.FAL_KEY && !this.config.apiKeys.falKey) {
-        this.config.apiKeys.falKey = process.env.FAL_KEY;
-      }
-      if (process.env.MESHY_API_KEY && !this.config.apiKeys.meshyApiKey) {
-        this.config.apiKeys.meshyApiKey = process.env.MESHY_API_KEY;
-      }
-
-      // Đẩy ngược lại biến môi trường của tiến trình hiện tại
-      if (this.config.apiKeys.geminiApiKey) {
-        process.env.GEMINI_API_KEY = this.config.apiKeys.geminiApiKey;
+        this.mergeConfig(parsed);
+      } else {
+        this.syncEnvFromConfig();
       }
     } catch (e: any) {
       console.warn('[ConfigRepository] Không thể đọc cấu hình từ đĩa, sử dụng mặc định:', e.message);
@@ -59,25 +98,134 @@ class ConfigRepository {
 
   private saveToDisk(): void {
     try {
+      this.syncEnvFromConfig();
       const dir = path.dirname(this.filePath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
       fs.writeFileSync(this.filePath, JSON.stringify(this.config, null, 2), 'utf-8');
-
-      // Ghi chú đồng bộ biến môi trường runtime
-      if (this.config.apiKeys?.geminiApiKey) {
-        process.env.GEMINI_API_KEY = this.config.apiKeys.geminiApiKey;
-      }
-      if (this.config.apiKeys?.falKey) {
-        process.env.FAL_KEY = this.config.apiKeys.falKey;
-      }
-      if (this.config.apiKeys?.meshyApiKey) {
-        process.env.MESHY_API_KEY = this.config.apiKeys.meshyApiKey;
-      }
     } catch (e: any) {
       console.warn('[ConfigRepository] Không thể lưu cấu hình ra đĩa:', e.message);
     }
+  }
+
+  private async ensureNeonTableAsync(): Promise<void> {
+    await executeNeonQuery(
+      `CREATE TABLE IF NOT EXISTS system_config_store (
+        id VARCHAR(64) PRIMARY KEY,
+        config JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );`
+    );
+  }
+
+  async ensureHydratedAsync(forceRefresh = false): Promise<ConfigStorageBackend> {
+    if (this.hydratedFromDb && !forceRefresh) {
+      return this.lastStorageBackend;
+    }
+    if (this.hydrationPromise && !forceRefresh) {
+      await this.hydrationPromise;
+      return this.lastStorageBackend;
+    }
+
+    const work = (async () => {
+      if (isNeonConfigured()) {
+        try {
+          await this.ensureNeonTableAsync();
+          const res = await executeNeonQuery<{ config: Partial<ISystemConfig> }>(
+            `SELECT config FROM system_config_store WHERE id = 'global_system_config' LIMIT 1;`
+          );
+          if (res.success && res.data && res.data.length > 0 && res.data[0].config) {
+            this.mergeConfig(res.data[0].config);
+          }
+          this.lastStorageBackend = 'neon_postgres';
+          this.hydratedFromDb = true;
+          return;
+        } catch (err: any) {
+          console.warn('[ConfigRepository] Neon hydrate failed:', err?.message || err);
+        }
+      }
+
+      if (supabaseCloudService.isConfigured) {
+        try {
+          const saved = await supabaseCloudService.loadKvState<Partial<ISystemConfig>>('laymor_system_config');
+          if (saved) {
+            this.mergeConfig(saved);
+          }
+          this.lastStorageBackend = 'supabase_kv';
+          this.hydratedFromDb = true;
+          return;
+        } catch {
+          // Ignore KV fallback errors
+        }
+      }
+
+      this.syncEnvFromConfig();
+      this.hydratedFromDb = true;
+    })();
+
+    this.hydrationPromise = work;
+    try {
+      await work;
+    } finally {
+      if (this.hydrationPromise === work) {
+        this.hydrationPromise = null;
+      }
+    }
+    return this.lastStorageBackend;
+  }
+
+  async persistDurableAsync(): Promise<{
+    persistedToDb: boolean;
+    storageBackend: ConfigStorageBackend;
+    error?: string;
+  }> {
+    this.saveToDisk();
+
+    if (isNeonConfigured()) {
+      try {
+        await this.ensureNeonTableAsync();
+        const writeRes = await executeNeonQuery(
+          `INSERT INTO system_config_store (id, config, updated_at)
+           VALUES ('global_system_config', $1::jsonb, CURRENT_TIMESTAMP)
+           ON CONFLICT (id) DO UPDATE SET
+             config = EXCLUDED.config,
+             updated_at = CURRENT_TIMESTAMP;`,
+          [JSON.stringify(this.config)]
+        );
+        if (!writeRes.success) {
+          return {
+            persistedToDb: false,
+            storageBackend: 'neon_postgres',
+            error: writeRes.error || 'Lỗi lưu cấu hình lên Neon PostgreSQL',
+          };
+        }
+        this.lastStorageBackend = 'neon_postgres';
+        this.hydratedFromDb = true;
+        return { persistedToDb: true, storageBackend: 'neon_postgres' };
+      } catch (err: any) {
+        return {
+          persistedToDb: false,
+          storageBackend: 'neon_postgres',
+          error: err?.message || 'Lỗi lưu cấu hình lên Neon PostgreSQL',
+        };
+      }
+    }
+
+    if (supabaseCloudService.isConfigured) {
+      const ok = await supabaseCloudService.saveKvState('laymor_system_config', this.config);
+      if (ok) {
+        this.lastStorageBackend = 'supabase_kv';
+        this.hydratedFromDb = true;
+        return { persistedToDb: true, storageBackend: 'supabase_kv' };
+      }
+    }
+
+    return { persistedToDb: false, storageBackend: 'disk_memory' };
+  }
+
+  getStorageBackend(): ConfigStorageBackend {
+    return this.lastStorageBackend;
   }
 
   getConfig(): ISystemConfig {

@@ -111,6 +111,7 @@ function AdminPageContent() {
     try {
       const apiKey = systemConfig.apiKeys.geminiApiKey?.trim();
       const res = await fetch('/api/admin/gemini/models', {
+        credentials: 'include',
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey }),
@@ -161,9 +162,27 @@ function AdminPageContent() {
     }
   }, [tabQuery, currentUser?.role]);
 
-  // Fetch admin system configuration
+  const [configStorageLabel, setConfigStorageLabel] = useState<string>('Neon PostgreSQL');
+  const isStrictMasterAdmin = Boolean(
+    currentUser && (currentUser.role === 'admin' || currentUser.username === 'hlcai_admin')
+  );
+
+  // Sync admin system configuration (re-runs when auth hydrates so only Master Admin loads keys)
   React.useEffect(() => {
-    fetch('/api/admin/config')
+    fetch('/api/admin/config', { credentials: 'include', cache: 'no-store' })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.config) {
+          setSystemConfig(data.config);
+        }
+        if (data.storageLabel) {
+          setConfigStorageLabel(data.storageLabel);
+        }
+      })
+      .catch(console.error);
+  }, [currentUser?.id, currentUser?.role]);
+  React.useEffect(() => {
+    Promise.resolve({ json: async () => ({ success: false, config: null as any }) })
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.config) {
@@ -177,6 +196,7 @@ function AdminPageContent() {
     setIsSavingConfig(true);
     try {
       const res = await fetch('/api/admin/config', {
+        credentials: 'include',
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ section, ...payload }),
@@ -1134,7 +1154,8 @@ function AdminPageContent() {
       {/* TAB 4: SYSTEM CONFIG, MATERIAL COSTS & API KEYS */}
       {activeTab === 'settings' && (
         <div className="space-y-6">
-          {/* Section 1: API Keys */}
+          {/* Section 1: API Keys (STRICT MASTER ADMIN ONLY) */}
+          {isStrictMasterAdmin ? (
           <div className="vision-glass rounded-[32px] p-5 sm:p-6 space-y-4 border border-slate-200/80 bg-white/90 shadow-sm">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
@@ -1146,7 +1167,7 @@ function AdminPageContent() {
                     1. Khóa Kết Nối API (Google Gemini, Fal.ai &amp; Meshy)
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Quản trị viên có thể nhập trực tiếp API Key để kích hoạt phân tích dữ liệu và sinh 3D thực tế
+                    Chỉ Master Admin mới được xem và cài đặt API Key. Hệ thống lưu thẳng lên Server ({configStorageLabel}) để toàn bộ thành viên sử dụng AI không cần nhập Key.
                   </p>
                 </div>
               </div>
@@ -1315,6 +1336,15 @@ function AdminPageContent() {
               </button>
             </div>
           </div>
+
+          ) : (
+            <div className="vision-glass rounded-[32px] p-5 border border-amber-200 bg-amber-50/80 text-amber-900 text-xs font-semibold flex items-center gap-3">
+              <ShieldAlert className="w-5 h-5 text-amber-700 shrink-0" />
+              <span>
+                Khu vực cài đặt &amp; xem Khóa API (Google Gemini, Fal.ai, Meshy.ai) được khóa riêng cho tài khoản Master Admin (`hlcai_admin`). Tài khoản khác sử dụng AI trực tiếp thông qua Server.
+              </span>
+            </div>
+          )}
 
           {/* Section 2: Material Costs (Giá vốn nhựa) */}
           <div className="vision-glass rounded-[32px] p-5 sm:p-6 space-y-4 border border-slate-200/80 bg-white/90 shadow-sm">
